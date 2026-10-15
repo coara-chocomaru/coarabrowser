@@ -156,10 +156,17 @@ public final class PluginManager {
             m.consumeActiveMarker();
         } catch (Throwable ignored) {
         }
-        try {
-            m.cleanupOrphans();
-        } catch (Throwable ignored) {
-        }
+        final PluginManager target = m;
+        Thread cleanup = new Thread(() -> {
+            try {
+                Thread.sleep(4000L);
+                target.cleanupOrphans();
+            } catch (Throwable ignored) {
+            }
+        }, "coara-plugin-cleanup");
+        cleanup.setDaemon(true);
+        cleanup.setPriority(Thread.MIN_PRIORITY);
+        cleanup.start();
     }
 
     public static boolean isSecretProcess() {
