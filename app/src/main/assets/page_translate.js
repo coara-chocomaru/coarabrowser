@@ -9,6 +9,7 @@
     }
     var kana = /[぀-ヿ]/;
     var latin = /[A-Za-z]/;
+    var skipKana = window.__coaraTrTarget === 'ja';
     if (!S) {
         first = true;
         S = window.__coaraTr = {
@@ -114,7 +115,7 @@
         if (!t) {
             continue;
         }
-        if (kana.test(t) && !latin.test(t)) {
+        if (skipKana && kana.test(t) && !latin.test(t)) {
             S.done.add(node);
             continue;
         }
