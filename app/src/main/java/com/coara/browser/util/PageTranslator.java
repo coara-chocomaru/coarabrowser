@@ -71,6 +71,8 @@ public final class PageTranslator {
     private static final class Session {
         final WeakReference<WebView> view;
         final boolean allowOnline;
+        final boolean silent;
+        final String target;
         final ArrayDeque<Chunk> mlQueue = new ArrayDeque<>();
         String source;
         boolean online;
@@ -83,21 +85,27 @@ public final class PageTranslator {
         int pending;
         long pollMs = POLL_MS;
 
-        Session(WebView view, boolean allowOnline) {
+        Session(WebView view, boolean allowOnline, boolean silent, String target, String fixedSource) {
             this.view = new WeakReference<>(view);
             this.allowOnline = allowOnline;
             this.online = allowOnline;
+            this.silent = silent;
+            this.target = target;
+            this.source = TranslateSettings.AUTO.equals(fixedSource) ? null : fixedSource;
         }
+    }
+
+    private static boolean translatable(String url) {
+        return url != null && !url.isEmpty()
+                && (url.startsWith("http://") || url.startsWith("https://"))
+                && !BrowserAssetLoader.isAppAssetUrl(url);
     }
 
     public static void toggle(WebView view, boolean allowOnline) {
         if (view == null) {
             return;
         }
-        String url = view.getUrl();
-        if (url == null || url.isEmpty()
-                || !(url.startsWith("http://") || url.startsWith("https://"))
-                || BrowserAssetLoader.isAppAssetUrl(url)) {
+        if (!translatable(view.getUrl())) {
             toast(view, "このページは翻訳できません");
             return;
         }
@@ -106,9 +114,30 @@ public final class PageTranslator {
             if ("1".equals(value)) {
                 restore(view);
             } else {
-                start(view, allowOnline);
+                start(view, allowOnline, false);
             }
         });
+    }
+
+    public static void onPageStarted(WebView view) {
+        if (view != null) {
+            SESSIONS.remove(view);
+        }
+    }
+
+    public static void onPageFinished(WebView view, boolean allowOnline) {
+        if (view == null) {
+            return;
+        }
+        Context context = view.getContext();
+        if (!TranslateSettings.isAutoTranslate(context, !allowOnline)) {
+            return;
+        }
+        if (!translatable(view.getUrl()) || SESSIONS.get(view) != null) {
+            return;
+        }
+        ensureMlKit(context);
+        start(view, allowOnline, true);
     }
 
     public static void release() {
@@ -144,10 +173,16 @@ public final class PageTranslator {
         }
     }
 
-    private static void start(WebView view, boolean allowOnline) {
-        Session session = new Session(view, allowOnline);
+    private static void start(WebView view, boolean allowOnline, boolean silent) {
+        Context context = view.getContext();
+        boolean secret = !allowOnline;
+        Session session = new Session(view, allowOnline, silent,
+                TranslateSettings.getTarget(context, secret),
+                TranslateSettings.getSource(context, secret));
         SESSIONS.put(view, session);
-        toast(view, "翻訳中…");
+        if (!silent) {
+            toast(view, "翻訳中…");
+        }
         extract(session, true);
     }
 
@@ -176,7 +211,8 @@ public final class PageTranslator {
             return;
         }
         try {
-            view.evaluateJavascript(script, value -> onExtracted(session, value, first));
+            view.evaluateJavascript("window.__coaraTrTarget='" + session.target + "';" + script,
+                    value -> onExtracted(session, value, first));
         } catch (Exception e) {
             abort(session, "翻訳できませんでした");
         }
@@ -216,6 +252,14 @@ public final class PageTranslator {
         }
         int base = result.optInt("base", 0);
         String lang = result.optString("lang", "");
+        if (first && session.silent && session.source == null && primary(lang).equals(primary(session.target))) {
+            abort(session, "");
+            return;
+        }
+        if (session.source != null && session.source.equals(primary(session.target))) {
+            abort(session, "翻訳元と翻訳先が同じ言語です");
+            return;
+        }
         if (session.source == null) {
             detect(session, texts, lang, base);
         } else {
@@ -252,8 +296,8 @@ public final class PageTranslator {
         if (source.isEmpty()) {
             source = "auto";
         }
-        if ("ja".equals(source)) {
-            abort(session, "このページは日本語です");
+        if (source.equals(primary(session.target))) {
+            abort(session, "このページは" + TranslateSettings.labelFor(session.target) + "です");
             return;
         }
         session.source = source;
@@ -285,10 +329,11 @@ public final class PageTranslator {
 
     private static void runOnline(Session session, Chunk chunk) {
         final String source = session.source;
+        final String target = session.target;
         executor().execute(() -> {
             String[] translated = null;
             try {
-                translated = onlineTranslate(source, chunk.texts);
+                translated = onlineTranslate(source, target, chunk.texts);
             } catch (Throwable ignored) {
             }
             final String[] result = translated;
@@ -307,7 +352,7 @@ public final class PageTranslator {
         });
     }
 
-    private static String[] onlineTranslate(String source, String[] texts) throws Exception {
+    private static String[] onlineTranslate(String source, String target, String[] texts) throws Exception {
         StringBuilder joined = new StringBuilder();
         for (int i = 0; i < texts.length; i++) {
             if (i > 0) {
@@ -315,7 +360,7 @@ public final class PageTranslator {
             }
             joined.append(texts[i]);
         }
-        String output = post(source, joined.toString());
+        String output = post(source, target, joined.toString());
         String[] parts = output.split("\n", -1);
         int end = parts.length;
         while (end > 0 && parts[end - 1].isEmpty()) {
@@ -328,15 +373,20 @@ public final class PageTranslator {
         }
         String[] result = new String[texts.length];
         for (int i = 0; i < texts.length; i++) {
-            String single = post(source, texts[i]);
+            String single = post(source, target, texts[i]);
             result[i] = single.replace("\n", " ").trim();
         }
         return result;
     }
 
-    private static String post(String source, String text) throws Exception {
-        String body = "client=gtx&sl=" + URLEncoder.encode(source, "UTF-8")
-                + "&tl=ja&dt=t&dj=1&ie=UTF-8&oe=UTF-8&q=" + URLEncoder.encode(text, "UTF-8");
+    private static String onlineCode(String tag) {
+        return "zh".equals(tag) ? "zh-CN" : tag;
+    }
+
+    private static String post(String source, String target, String text) throws Exception {
+        String body = "client=gtx&sl=" + URLEncoder.encode(onlineCode(source), "UTF-8")
+                + "&tl=" + URLEncoder.encode(onlineCode(target), "UTF-8")
+                + "&dt=t&dj=1&ie=UTF-8&oe=UTF-8&q=" + URLEncoder.encode(text, "UTF-8");
         byte[] payload = body.getBytes(StandardCharsets.UTF_8);
         HttpURLConnection connection = (HttpURLConnection) new URL(ENDPOINT).openConnection();
         try {
@@ -389,7 +439,7 @@ public final class PageTranslator {
             session.mlRunning = false;
             return;
         }
-        Translator translator = translator(session.source);
+        Translator translator = translator(session.source, session.target);
         if (translator == null) {
             mlFail(session, "翻訳に失敗しました。ネットワーク接続を確認してください");
             return;
@@ -464,7 +514,7 @@ public final class PageTranslator {
         session.pending = 0;
         session.mlQueue.clear();
         WebView view = session.view.get();
-        if (view != null && alive(session) && !session.errorShown) {
+        if (view != null && alive(session) && !session.errorShown && !session.silent) {
             session.errorShown = true;
             toast(view, message);
         }
@@ -504,7 +554,9 @@ public final class PageTranslator {
             view.evaluateJavascript(RESTORE_JS, null);
         } catch (Exception ignored) {
         }
-        toast(view, message);
+        if (!session.silent && !message.isEmpty()) {
+            toast(view, message);
+        }
     }
 
     private static void schedulePoll(Session session) {
@@ -546,18 +598,20 @@ public final class PageTranslator {
         }
     }
 
-    private static Translator translator(String tag) {
-        String language = TranslateLanguage.fromLanguageTag(tag);
-        if (language == null) {
+    private static Translator translator(String sourceTag, String targetTag) {
+        String from = TranslateLanguage.fromLanguageTag(sourceTag);
+        String to = TranslateLanguage.fromLanguageTag(targetTag);
+        if (from == null || to == null || from.equals(to)) {
             return null;
         }
-        Translator translator = TRANSLATORS.get(language);
+        String key = from + ">" + to;
+        Translator translator = TRANSLATORS.get(key);
         if (translator == null) {
             translator = Translation.getClient(new TranslatorOptions.Builder()
-                    .setSourceLanguage(language)
-                    .setTargetLanguage(TranslateLanguage.JAPANESE)
+                    .setSourceLanguage(from)
+                    .setTargetLanguage(to)
                     .build());
-            TRANSLATORS.put(language, translator);
+            TRANSLATORS.put(key, translator);
         }
         return translator;
     }
