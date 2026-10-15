@@ -6,6 +6,7 @@ import android.webkit.WebView;
 
 import androidx.webkit.BackForwardCacheSettings;
 import androidx.webkit.WebSettingsCompat;
+import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
 public final class WebViewOptimizationUtils {
@@ -59,6 +60,29 @@ public final class WebViewOptimizationUtils {
         }
         if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
             WebSettingsCompat.setRequestedWithHeaderOriginAllowList(settings, java.util.Collections.emptySet());
+        }
+    }
+
+    private static final String CLIENT_COMPAT_SCRIPT = "(function(){try{"
+            + "if(window.chrome)return;"
+            + "var f=function(){return{};};"
+            + "Object.defineProperty(window,'chrome',{value:{app:{isInstalled:false},csi:f,loadTimes:f},configurable:true,enumerable:true,writable:true});"
+            + "}catch(e){}})();";
+
+    private static Boolean docStartSupported;
+
+    public static void installClientCompat(WebView webView) {
+        if (webView == null) {
+            return;
+        }
+        try {
+            if (docStartSupported == null) {
+                docStartSupported = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT);
+            }
+            if (docStartSupported) {
+                WebViewCompat.addDocumentStartJavaScript(webView, CLIENT_COMPAT_SCRIPT, java.util.Collections.singleton("*"));
+            }
+        } catch (Throwable ignored) {
         }
     }
 
