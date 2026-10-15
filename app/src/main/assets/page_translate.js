@@ -46,7 +46,7 @@
             }
             for (i = 0; i < S.nodes.length; i++) {
                 n = S.nodes[i];
-                if (n.isConnected && S.tr.has(n) && S.orig.has(n) && n.nodeValue === S.tr.get(n)) {
+                if (n && n.isConnected && S.tr.has(n) && S.orig.has(n) && n.nodeValue === S.tr.get(n)) {
                     n.nodeValue = S.orig.get(n);
                 }
             }
@@ -79,6 +79,11 @@
         }
     }
     S.dirty = 0;
+    for (var k = 0; k < S.nodes.length; k++) {
+        if (S.nodes[k] && !S.nodes[k].isConnected) {
+            S.nodes[k] = null;
+        }
+    }
     var root = document.body || document.documentElement;
     var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
     var vis = [];
