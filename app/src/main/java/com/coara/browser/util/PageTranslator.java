@@ -4,6 +4,7 @@ import android.content.Context;
 import android.webkit.WebView;
 import android.widget.Toast;
 
+import com.google.mlkit.common.MlKit;
 import com.google.mlkit.common.model.DownloadConditions;
 import com.google.mlkit.nl.languageid.LanguageIdentification;
 import com.google.mlkit.nl.languageid.LanguageIdentificationOptions;
@@ -52,6 +53,7 @@ public final class PageTranslator {
     private static String extractScript;
     private static ExecutorService netExecutor;
     private static LanguageIdentifier identifier;
+    private static boolean mlKitReady;
 
     private PageTranslator() {
     }
@@ -99,6 +101,7 @@ public final class PageTranslator {
             toast(view, "このページは翻訳できません");
             return;
         }
+        ensureMlKit(view.getContext());
         view.evaluateJavascript(STATE_JS, value -> {
             if ("1".equals(value)) {
                 restore(view);
@@ -128,6 +131,17 @@ public final class PageTranslator {
             netExecutor = null;
         }
         SESSIONS.clear();
+    }
+
+    private static void ensureMlKit(Context context) {
+        if (mlKitReady) {
+            return;
+        }
+        try {
+            MlKit.initialize(context.getApplicationContext());
+            mlKitReady = true;
+        } catch (Throwable ignored) {
+        }
     }
 
     private static void start(WebView view, boolean allowOnline) {

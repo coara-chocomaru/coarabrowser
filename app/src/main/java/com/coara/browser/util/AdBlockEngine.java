@@ -59,9 +59,22 @@ public final class AdBlockEngine {
             } catch (Throwable ignored) {
                 enabled = false;
             }
-            script = AdBlockRules.buildScript();
             initialized = true;
         }
+    }
+
+    private static String script() {
+        String value = script;
+        if (value == null) {
+            synchronized (LOCK) {
+                value = script;
+                if (value == null) {
+                    value = AdBlockRules.buildScript();
+                    script = value;
+                }
+            }
+        }
+        return value;
     }
 
     public static boolean isEnabled() {
@@ -109,7 +122,7 @@ public final class AdBlockEngine {
             return;
         }
         try {
-            ScriptHandler handler = WebViewCompat.addDocumentStartJavaScript(view, script, Collections.singleton("*"));
+            ScriptHandler handler = WebViewCompat.addDocumentStartJavaScript(view, script(), Collections.singleton("*"));
             synchronized (HANDLERS) {
                 HANDLERS.put(view, handler);
             }
@@ -150,7 +163,7 @@ public final class AdBlockEngine {
             try {
                 if (value) {
                     install(view);
-                    view.evaluateJavascript(script, null);
+                    view.evaluateJavascript(script(), null);
                 } else {
                     removeHandler(view);
                     view.evaluateJavascript(AdBlockRules.SCRIPT_OFF, null);
@@ -165,7 +178,7 @@ public final class AdBlockEngine {
             return;
         }
         try {
-            view.evaluateJavascript(script, null);
+            view.evaluateJavascript(script(), null);
         } catch (Throwable ignored) {
         }
     }
