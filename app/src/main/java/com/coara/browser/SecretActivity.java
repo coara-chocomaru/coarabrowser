@@ -88,6 +88,7 @@ import com.coara.browser.util.DownloadFallbackManager;
 import com.coara.browser.util.BrowserConstants;
 import com.coara.browser.util.AdBlockEngine;
 import com.coara.browser.util.PageTranslator;
+import com.coara.browser.util.TranslateSettingsDialog;
 import com.coara.browser.util.BrowserUrlRouter;
 import com.coara.browser.util.BrowserAssetLoader;
 import com.coara.browser.webview.WebViewOptimizationUtils;
@@ -1091,6 +1092,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
             }
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                PageTranslator.onPageStarted(view);
                 SafeBrowsingSupport.recordNavigation(view, url);
                 ExternalDownloadTabTracker.onPageStarted(view, url);
                 PluginRuntime.onPageStarted(view, url);
@@ -1122,6 +1124,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
                 KeyboardSettings.configureWebView(view, pref);
                 installDownloadHintScript(view);
                   super.onPageFinished(view, url);
+                PageTranslator.onPageFinished(view, false);
             if (url.startsWith("https://m.youtube.com") || url.startsWith("https://chatgpt.com/")) {
                 UiThread.postDelayed(() -> injectLazyLoading(view), 200);
             }
@@ -2203,6 +2206,9 @@ private class AndroidBridge {
             applyNegapoji();
         } else if (id == R.id.action_translate) {
             translatePageToJapanese();
+            return true;
+        } else if (id == R.id.action_translate_settings) {
+            TranslateSettingsDialog.show(this, true);
             return true;
         } else if (id == R.id.action_screenshot) {
             takeScreenshot();

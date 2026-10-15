@@ -97,6 +97,7 @@ import com.coara.browser.util.AdBlockEngine;
 import com.coara.browser.util.BookmarkDialog;
 import com.coara.browser.util.BookmarkStore;
 import com.coara.browser.util.PageTranslator;
+import com.coara.browser.util.TranslateSettingsDialog;
 import com.coara.browser.util.BrowserUrlRouter;
 import com.coara.browser.util.BrowserAssetLoader;
 import com.coara.browser.webview.BlobDownloadBridge;
@@ -1924,6 +1925,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
             }
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                PageTranslator.onPageStarted(view);
                 SafeBrowsingSupport.recordNavigation(view, url);
                 ExternalDownloadTabTracker.onPageStarted(view, url);
                 PluginRuntime.onPageStarted(view, url);
@@ -1965,6 +1967,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 }
                 installDownloadHintScript(view);
                 super.onPageFinished(view, url);
+                PageTranslator.onPageFinished(view, true);
                 applyBrowserVisualSettings(view);
                 BrowserThemeManager.applyToWebView(view, MainActivity.this);
                 DesktopContentOptimizer.apply(view, deskuaEnabled);
@@ -3975,6 +3978,9 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
             applyNegapoji();
         } else if (id == R.id.action_translate) {
             translatePageToJapanese();
+            return true;
+        } else if (id == R.id.action_translate_settings) {
+            TranslateSettingsDialog.show(this, false);
             return true;
         } else if (id == R.id.action_clear_tabs) {
             clearTabs();
