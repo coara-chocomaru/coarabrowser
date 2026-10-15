@@ -87,6 +87,7 @@ import com.coara.browser.util.DownloadSupport;
 import com.coara.browser.util.DownloadFallbackManager;
 import com.coara.browser.util.BrowserConstants;
 import com.coara.browser.util.AdBlockEngine;
+import com.coara.browser.util.PageTranslator;
 import com.coara.browser.util.BrowserUrlRouter;
 import com.coara.browser.util.BrowserAssetLoader;
 import com.coara.browser.webview.WebViewOptimizationUtils;
@@ -713,6 +714,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
 
     @Override
     protected void onDestroy() {
+        PageTranslator.release();
         if (findController != null) {
             findController.release();
         }
@@ -892,6 +894,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         webView.addJavascriptInterface(blobDownloadBridge, "BlobDownloader");
         PluginRuntime.attach(this, webView);
         AdBlockEngine.attach(webView);
+        com.coara.browser.webview.WebViewOptimizationUtils.installClientCompat(webView);
         SafeBrowsingSupport.recordSafePage(webView, START_PAGE);
 
         webView.setOnLongClickListener(v -> {
@@ -1034,12 +1037,6 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
                 } catch (Exception ignored) {
                 }
                 UiThread.mainHandler().post(() -> recoverFromRenderProcessGone(view, targetUrl, wasExternal));
-                try {
-                    Toast.makeText(SecretActivity.this,
-                            crashed ? "ページの表示中に問題が発生したため復旧しました" : "ページを再読み込みしました",
-                            Toast.LENGTH_SHORT).show();
-                } catch (Exception ignored) {
-                }
                 return true;
             }
 
@@ -2229,19 +2226,12 @@ private class AndroidBridge {
     }
 
     private void translatePageToJapanese() {
-        String currentUrl = getCurrentWebView().getUrl();
-        if (currentUrl == null || currentUrl.isEmpty()) {
+        WebView target = getCurrentWebView();
+        if (target == null) {
             Toast.makeText(SecretActivity.this, "翻訳するページが見つかりません", Toast.LENGTH_SHORT).show();
             return;
         }
-        try {
-            String encodedUrl = URLEncoder.encode(currentUrl, "UTF-8");
-            String translateUrl = "https://translate.google.com/translate?hl=ja&sl=auto&tl=ja&u=" + encodedUrl;
-            getCurrentWebView().loadUrl(translateUrl);
-        } catch (UnsupportedEncodingException e) {
-            Toast.makeText(SecretActivity.this, "翻訳中にエラーが発生しました", Toast.LENGTH_SHORT).show();
-            e.printStackTrace();
-        }
+        PageTranslator.toggle(target, false);
     }
     private void clearSecretDataAndReturnToMain() {
         WebView current = webView;

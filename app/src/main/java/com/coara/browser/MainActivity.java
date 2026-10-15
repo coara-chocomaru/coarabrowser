@@ -96,6 +96,7 @@ import com.google.android.material.snackbar.Snackbar;
 import com.coara.browser.util.AdBlockEngine;
 import com.coara.browser.util.BookmarkDialog;
 import com.coara.browser.util.BookmarkStore;
+import com.coara.browser.util.PageTranslator;
 import com.coara.browser.util.BrowserUrlRouter;
 import com.coara.browser.util.BrowserAssetLoader;
 import com.coara.browser.webview.BlobDownloadBridge;
@@ -1038,6 +1039,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
 
     @Override
     protected void onDestroy() {
+        PageTranslator.release();
         if (findController != null) {
             findController.release();
         }
@@ -1677,6 +1679,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         webView.addJavascriptInterface(blobDownloadBridge, "BlobDownloader");
         PluginRuntime.attach(this, webView);
         AdBlockEngine.attach(webView);
+        WebViewOptimizationUtils.installClientCompat(webView);
         SafeBrowsingSupport.recordSafePage(webView, START_PAGE);
 
         webView.setOnLongClickListener(v -> {
@@ -1846,9 +1849,6 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                         }
                     });
 
-                    Toast.makeText(MainActivity.this,
-                            crashed ? "ページの表示中に問題が発生したため復旧しました" : "タブを再読み込みしました",
-                            Toast.LENGTH_SHORT).show();
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
@@ -4010,19 +4010,12 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
     }
 
     private void translatePageToJapanese() {
-        String currentUrl = getCurrentWebView().getUrl();
-        if (currentUrl == null || currentUrl.isEmpty()) {
+        WebView target = getCurrentWebView();
+        if (target == null) {
             Toast.makeText(MainActivity.this, "翻訳するページが見つかりません", Toast.LENGTH_SHORT).show();
             return;
         }
-        try {
-            String encodedUrl = URLEncoder.encode(currentUrl, "UTF-8");
-            String translateUrl = "https://translate.google.com/translate?hl=ja&sl=auto&tl=ja&u=" + encodedUrl;
-            getCurrentWebView().loadUrl(translateUrl);
-        } catch (UnsupportedEncodingException e) {
-            Toast.makeText(MainActivity.this, "翻訳中にエラーが発生しました", Toast.LENGTH_SHORT).show();
-            e.printStackTrace();
-        }
+        PageTranslator.toggle(target, true);
     }
 
     private void applyNegapoji() {
