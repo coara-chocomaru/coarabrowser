@@ -26,7 +26,9 @@ public class BrowserApplication extends Application {
         super.onCreate();
         installCrashLogger();
         initializePlugins();
-        createDownloadNotificationChannel();
+        Thread channels = new Thread(this::createDownloadNotificationChannel, "coara-channels");
+        channels.setDaemon(true);
+        channels.start();
     }
 
     private void initializePlugins() {

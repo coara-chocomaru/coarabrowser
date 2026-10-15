@@ -1979,7 +1979,9 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                     try {
                         String cur = view.getUrl();
                         if (cur != null && cur.equals(capturedUrl)) {
-                            WebViewOptimizationUtils.injectSpaProbe(view);
+                            if (!SpaStateManager.getInstance().isSpa(view)) {
+                                WebViewOptimizationUtils.injectSpaProbe(view);
+                            }
                             DesktopContentOptimizer.apply(view, deskuaEnabled);
                             BrowserThemeManager.applyToWebView(view, MainActivity.this);
                         }
