@@ -2,3 +2,5 @@ HSPLcom/coara/browser/MainActivity**->**(**)**
 HSPLcom/coara/browser/BrowserApplication;->**(**)**
 HSPLcom/coara/browser/util/**->**(**)**
 HSPLcom/coara/browser/webview/**->**(**)**
+HSPLcom/coara/browser/plugin/PluginManager;->**(**)**
+HSPLcom/coara/browser/plugin/PluginRuntime;->**(**)**
