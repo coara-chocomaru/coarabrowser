@@ -136,7 +136,7 @@ public final class WebViewOptimizationUtils {
                 "var timer=0;" +
                 "var schedule=function(){" +
                 "if(timer)return;" +
-                "timer=setTimeout(function(){timer=0;scan();},300);" +
+                "timer=setTimeout(function(){timer=0;scan();},800);" +
                 "};" +
                 "document.addEventListener('click',function(e){" +
                 "try{" +
@@ -148,7 +148,16 @@ public final class WebViewOptimizationUtils {
                 "},true);" +
                 "scan();" +
                 "if(window.MutationObserver){" +
-                "new MutationObserver(schedule).observe(document.documentElement||document,{subtree:true,childList:true});" +
+                "new MutationObserver(function(ms){" +
+                "if(timer)return;" +
+                "for(var i=0;i<ms.length&&i<40;i++){" +
+                "var an=ms[i].addedNodes;" +
+                "for(var j=0;j<an.length;j++){" +
+                "var nd=an[j];" +
+                "if(nd.nodeType===1&&((nd.matches&&nd.matches('a[download]'))||(nd.querySelector&&nd.querySelector('a[download]')))){schedule();return;}" +
+                "}" +
+                "}" +
+                "}).observe(document.documentElement||document,{subtree:true,childList:true});" +
                 "}" +
                 "}catch(e){}" +
                 "})();";
@@ -196,18 +205,6 @@ public final class WebViewOptimizationUtils {
                 + "if(root&&root.childElementCount>3)s=true;"
                 + "}"
                 + "if(!s){"
-                + "var cs=document.querySelectorAll('canvas');"
-                + "for(var i=0;i<cs.length;i++){"
-                + "if(cs[i].offsetWidth>100&&cs[i].offsetHeight>100){s=true;break;}"
-                + "}"
-                + "}"
-                + "if(!s){"
-                + "try{"
-                + "var bs=window.getComputedStyle(document.body);"
-                + "if(bs.overflow==='hidden'||bs.overflowY==='hidden')s=true;"
-                + "}catch(ce){}"
-                + "}"
-                + "if(!s){"
                 + "var scr=document.querySelectorAll('script[src]'),bc=0;"
                 + "for(var j=0;j<scr.length;j++){"
                 + "var src=scr[j].getAttribute('src')||'';"
@@ -220,6 +217,18 @@ public final class WebViewOptimizationUtils {
                 + "try{"
                 + "if(history.pushState.toString().indexOf('native code')===-1)s=true;"
                 + "}catch(pe){}"
+                + "}"
+                + "if(!s){"
+                + "var cs=document.querySelectorAll('canvas');"
+                + "for(var i=0;i<cs.length;i++){"
+                + "if(cs[i].offsetWidth>100&&cs[i].offsetHeight>100){s=true;break;}"
+                + "}"
+                + "}"
+                + "if(!s){"
+                + "try{"
+                + "var bs=window.getComputedStyle(document.body);"
+                + "if(bs.overflow==='hidden'||bs.overflowY==='hidden')s=true;"
+                + "}catch(ce){}"
                 + "}"
                 + "}catch(e){}"
                 + "try{"
