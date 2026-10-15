@@ -29,7 +29,8 @@
             <item android:id="@+id/action_negapoji" android:title="ネガポジ" />
             <item android:id="@+id/action_deskua" android:title="デスクトップ表示" android:checkable="true" />
             <item android:id="@+id/action_ct3ua" android:title="CT3UA" android:checkable="true" />
-            <item android:id="@+id/action_translate" android:title="日本語に翻訳" />
+            <item android:id="@+id/action_translate" android:title="ページを翻訳" />
+            <item android:id="@+id/action_translate_settings" android:title="翻訳設定" />
         </menu>
     </item>
 
