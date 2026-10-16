@@ -8,8 +8,8 @@ android {
     defaultConfig {
         minSdk = 24
         targetSdk = 31
-        versionCode = 328
-        versionName = "4.4.4-1"
+        versionCode = 330
+        versionName = "4.4.4-3"
         multiDexEnabled = true
         if (project.hasProperty('bundleBuild')) {
             ndk {
@@ -28,10 +28,18 @@ android {
     
     signingConfigs {
         release {
-            storeFile file('test.jks')
-            storePassword 'test1234'
-            keyAlias 'key0'
-            keyPassword 'test1234'
+            def releaseKeystorePath = System.getenv('RELEASE_KEYSTORE_PATH')
+            if (releaseKeystorePath) {
+                storeFile file(releaseKeystorePath)
+                storePassword System.getenv('RELEASE_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('RELEASE_KEY_ALIAS')
+                keyPassword System.getenv('RELEASE_KEY_PASSWORD')
+            } else {
+                storeFile file('test.jks')
+                storePassword 'test1234'
+                keyAlias 'key0'
+                keyPassword 'test1234'
+            }
         }
     }
 

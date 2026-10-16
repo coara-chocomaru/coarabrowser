@@ -102,3 +102,14 @@
 -keepclassmembers,allowoptimization class com.coara.browser.plugin.PluginBridge {
     @android.webkit.JavascriptInterface <methods>;
 }
+
+-assumenosideeffects class android.util.Log {
+    public static int v(...);
+    public static int d(...);
+    public static int i(...);
+}
+
+-dontnote **
+-keepclassmembers class * implements androidx.webkit.WebViewCompat$WebMessageListener {
+    public void onPostMessage(...);
+}
