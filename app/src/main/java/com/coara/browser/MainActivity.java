@@ -4184,6 +4184,15 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 Toast.makeText(MainActivity.this, "Basic認証 OFF", Toast.LENGTH_SHORT).show();
             }
             invalidateOptionsMenu();
+        } else if (id == R.id.action_clear_cookies) {
+            showClearCookiesDialog();
+            return true;
+        } else if (id == R.id.action_clear_cache) {
+            showClearCacheDialog();
+            return true;
+        } else if (id == R.id.action_clear_form_history) {
+            showClearFormHistoryDialog();
+            return true;
         } else if (id == R.id.action_clear_history) {
             clearAllBrowsingData();
             urlEditText.setInputType(EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_VARIATION_URI | EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
@@ -4269,6 +4278,67 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
     @SuppressWarnings("deprecation")
     private void clearWebStorage() {
         WebStorage.getInstance().deleteAllData();
+    }
+
+    private void showClearCookiesDialog() {
+        new AlertDialog.Builder(MainActivity.this)
+                .setTitle("クッキーを消去")
+                .setMessage("一時クッキーを全て消しますか？")
+                .setPositiveButton("はい", (dialog, which) -> {
+                    CookieManager cookieManager = CookieManager.getInstance();
+                    cookieManager.removeAllCookies(removed -> {
+                        cookieManager.flush();
+                        runOnUiThread(() -> Toast.makeText(MainActivity.this, "クッキーを消去しました", Toast.LENGTH_SHORT).show());
+                    });
+                })
+                .setNegativeButton("いいえ", null)
+                .show();
+    }
+
+    private void showClearCacheDialog() {
+        new AlertDialog.Builder(MainActivity.this)
+                .setTitle("キャッシュを消去")
+                .setMessage("一時キャッシュを全て消しますか？")
+                .setPositiveButton("はい", (dialog, which) -> {
+                    ArrayList<WebView> all;
+                    synchronized (webViews) {
+                        all = new ArrayList<>(webViews);
+                    }
+                    for (WebView webView : all) {
+                        try {
+                            webView.clearCache(true);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    Toast.makeText(MainActivity.this, "キャッシュを消去しました", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("いいえ", null)
+                .show();
+    }
+
+    private void showClearFormHistoryDialog() {
+        new AlertDialog.Builder(MainActivity.this)
+                .setTitle("フォーム履歴を消去")
+                .setMessage("フォームの入力履歴を全て消しますか？")
+                .setPositiveButton("はい", (dialog, which) -> {
+                    ArrayList<WebView> all;
+                    synchronized (webViews) {
+                        all = new ArrayList<>(webViews);
+                    }
+                    for (WebView webView : all) {
+                        try {
+                            webView.clearFormData();
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    try {
+                        WebViewDatabase.getInstance(MainActivity.this).clearFormData();
+                    } catch (Exception ignored) {
+                    }
+                    Toast.makeText(MainActivity.this, "フォーム履歴を消去しました", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("いいえ", null)
+                .show();
     }
 
     private void reloadCurrentPage() {
