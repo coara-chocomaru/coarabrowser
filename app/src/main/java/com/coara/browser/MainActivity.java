@@ -101,6 +101,9 @@ import com.coara.browser.util.TranslateSettingsDialog;
 import com.coara.browser.util.BrowserUrlRouter;
 import com.coara.browser.util.BrowserAssetLoader;
 import com.coara.browser.webview.BlobDownloadBridge;
+import com.coara.browser.webview.BridgeGuard;
+import com.coara.browser.webview.CookieGate;
+import androidx.webkit.JavaScriptReplyProxy;
 import com.coara.browser.webview.TabOverviewDialog;
 import com.coara.browser.util.TabStateStore;
 import com.coara.browser.util.TabHistoryStore;
@@ -108,6 +111,7 @@ import com.coara.browser.util.SwipeRefreshPolicy;
 import com.coara.browser.util.SpaStateManager;
 import com.coara.browser.util.CacheModePolicy;
 import com.coara.browser.util.BrowserConstants;
+import com.coara.browser.util.CookieSitePolicy;
 import com.coara.browser.util.BasicAuthManager;
 import com.coara.browser.util.ExternalDownloadTabTracker;
 import com.coara.browser.util.DownloadSupport;
@@ -253,13 +257,15 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
     private boolean defaultLoadsImagesAutomaticallyInitialized = false;
     private View customView = null;
     private WebChromeClient.CustomViewCallback customViewCallback = null;
-    private final Map<WebView, Bitmap> tabSnapshots = new HashMap<>();
+    private final Map<WebView, Bitmap> tabSnapshots = new LinkedHashMap<>();
+    private static final int MAX_MEMORY_SNAPSHOTS = 10;
     private final Map<WebView, Runnable> pendingSpaHistoryTasks = new HashMap<>();
     
     
     
     private final Map<WebView, Boolean> pullToRefreshEligibleCache = new HashMap<>();
     private final Map<WebView, PendingTab> pendingTabs = new HashMap<>();
+    private final Set<WebView> loadedPages = Collections.newSetFromMap(new WeakHashMap<WebView, Boolean>());
     private final Map<WebView, TabHistoryStore.State> tabHistoryStates = new HashMap<>();
     private final Set<WebView> backNavigationTabs = Collections.newSetFromMap(new WeakHashMap<WebView, Boolean>());
     private final Set<WebView> customBackTabs = Collections.newSetFromMap(new WeakHashMap<WebView, Boolean>());
@@ -973,6 +979,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 pluginReloadPending = true;
             }
         }
+        refreshThirdPartyCookiePolicy();
         resumeAllWebViewTimers();
         resumeCurrentWebView();
         if (urlEditMode) {
@@ -1148,6 +1155,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
             Bitmap bm = BitmapFactory.decodeFile(snapFile.getAbsolutePath(), snapOptions);
             if (bm != null) {
                 tabSnapshots.put(webView, bm);
+                trimSnapshotMemory(webView);
             }
             return bm;
         } catch (Exception e) {
@@ -1601,10 +1609,191 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         }
     }
 
+    private void applyThirdPartyCookiesFor(WebView webView, String url) {
+        if (webView == null) {
+            return;
+        }
+        try {
+            CookieManager.getInstance().setAcceptThirdPartyCookies(webView, CookieSitePolicy.isAllowed(pref, url));
+        } catch (Exception ignored) {
+        }
+    }
+
     private void applyCookiePolicy(WebView webView) {
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.setAcceptCookie(true);
-        cookieManager.setAcceptThirdPartyCookies(webView, true);
+        applyThirdPartyCookiesFor(webView, webView.getUrl());
+    }
+
+    private int cookiePolicyStamp = Integer.MIN_VALUE;
+
+    private int computeCookiePolicyStamp() {
+        return java.util.Objects.hash(
+                CookieSitePolicy.globalAllowed(pref),
+                pref.getStringSet(CookieSitePolicy.KEY_ALLOW_SITES, null),
+                pref.getStringSet(CookieSitePolicy.KEY_BLOCK_SITES, null));
+    }
+
+    private void refreshThirdPartyCookiePolicy() {
+        int stamp = computeCookiePolicyStamp();
+        if (stamp == cookiePolicyStamp) {
+            return;
+        }
+        cookiePolicyStamp = stamp;
+        ArrayList<WebView> tabs;
+        synchronized (webViews) {
+            tabs = new ArrayList<>(webViews);
+        }
+        for (WebView w : tabs) {
+            PendingTab pending = pendingTabs.get(w);
+            applyThirdPartyCookiesFor(w, pending != null ? pending.url : w.getUrl());
+        }
+    }
+
+    private boolean cookiePromptShowing;
+    private final Map<WebView, Set<String>> cookiePrompted = new WeakHashMap<>();
+
+    private void onCookieGateRequest(WebView view, String frameOrigin, String message, JavaScriptReplyProxy reply) {
+        final boolean storageAccess = message.startsWith(CookieGate.KIND_STORAGE_ACCESS);
+        try {
+            final String topUrl = view.getUrl();
+            if (!BrowserUrlRouter.isWebUrl(topUrl)) {
+                if (storageAccess) {
+                    CookieGate.reply(reply, message, false);
+                }
+                return;
+            }
+            final String topHost = CookieSitePolicy.hostOf(topUrl);
+            final String frameHost = CookieSitePolicy.hostOf(frameOrigin);
+            if (topHost.isEmpty() || frameHost.isEmpty()) {
+                if (storageAccess) {
+                    CookieGate.reply(reply, message, false);
+                }
+                return;
+            }
+            final String topSite = CookieGate.siteOf(topHost);
+            final String frameSite = CookieGate.siteOf(frameHost);
+            if (topSite.equals(frameSite)) {
+                if (storageAccess) {
+                    CookieGate.reply(reply, message, true);
+                }
+                return;
+            }
+            if (CookieSitePolicy.isAllowed(pref, topUrl)) {
+                if (storageAccess) {
+                    CookieGate.reply(reply, message, true);
+                }
+                return;
+            }
+            if (CookieSitePolicy.override(pref, topUrl) < 0) {
+                if (storageAccess) {
+                    CookieGate.reply(reply, message, false);
+                }
+                return;
+            }
+            Set<String> prompted = cookiePrompted.get(view);
+            if (prompted == null) {
+                prompted = new java.util.HashSet<>();
+                cookiePrompted.put(view, prompted);
+            }
+            final String key = frameSite;
+            if (prompted.contains(key) || cookiePromptShowing || view != getCurrentWebView()
+                    || isFinishing() || isDestroyed() || urlEditMode) {
+                if (storageAccess) {
+                    CookieGate.reply(reply, message, false);
+                }
+                return;
+            }
+            prompted.add(key);
+            cookiePromptShowing = true;
+            final String text = (storageAccess ? frameHost + " がCookieへのアクセスを求めています。" : frameHost + " がCookieを保存しようとしましたが、現在ブロックされています。")
+                    + "\n\n表示中のサイト: " + topHost
+                    + "\n\n許可すると、このサイト(" + topHost + ")ではサードパーティCookieが有効になります(WebViewの仕様上、埋め込み元ごとの個別許可はできません)。許可後はページを再読み込みします。";
+            new AlertDialog.Builder(this)
+                    .setTitle("サードパーティCookieの要求")
+                    .setMessage(text)
+                    .setCancelable(true)
+                    .setPositiveButton("許可して再読み込み", (d, w) -> {
+                        if (CookieSitePolicy.setOverride(pref, topUrl, 1)) {
+                            applyThirdPartyCookiesFor(view, topUrl);
+                            cookiePolicyStamp = computeCookiePolicyStamp();
+                            if (storageAccess) {
+                                CookieGate.reply(reply, message, true);
+                            }
+                            if (view == getCurrentWebView()) {
+                                view.reload();
+                            }
+                        } else if (storageAccess) {
+                            CookieGate.reply(reply, message, false);
+                        }
+                    })
+                    .setNeutralButton("このサイトでは常に拒否", (d, w) -> {
+                        CookieSitePolicy.setOverride(pref, topUrl, -1);
+                        cookiePolicyStamp = computeCookiePolicyStamp();
+                        applyThirdPartyCookiesFor(view, topUrl);
+                        if (storageAccess) {
+                            CookieGate.reply(reply, message, false);
+                        }
+                    })
+                    .setNegativeButton("今回は拒否", (d, w) -> {
+                        if (storageAccess) {
+                            CookieGate.reply(reply, message, false);
+                        }
+                    })
+                    .setOnCancelListener(d -> {
+                        if (storageAccess) {
+                            CookieGate.reply(reply, message, false);
+                        }
+                    })
+                    .setOnDismissListener(d -> cookiePromptShowing = false)
+                    .show();
+        } catch (Exception e) {
+            cookiePromptShowing = false;
+            if (storageAccess) {
+                CookieGate.reply(reply, message, false);
+            }
+        }
+    }
+
+    private void showSiteThirdPartyCookieDialog() {
+        final WebView current = getCurrentWebView();
+        if (current == null) {
+            return;
+        }
+        final PendingTab pending = pendingTabs.get(current);
+        final String url = pending != null ? pending.url : current.getUrl();
+        final String host = CookieSitePolicy.hostOf(url);
+        if (host.isEmpty() || !BrowserUrlRouter.isWebUrl(url)) {
+            Toast.makeText(this, "このページでは設定できません", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final boolean globalAllowed = CookieSitePolicy.globalAllowed(pref);
+        final int mode = CookieSitePolicy.override(pref, url);
+        final String[] labels = new String[] {
+                "このサイトで許可",
+                "このサイトでブロック",
+                "既定に従う(現在の既定: " + (globalAllowed ? "許可" : "ブロック") + ")"
+        };
+        int checked = mode > 0 ? 0 : (mode < 0 ? 1 : 2);
+        new AlertDialog.Builder(this)
+                .setTitle("サードパーティCookie: " + host)
+                .setSingleChoiceItems(labels, checked, (dialog, which) -> {
+                    int newMode = which == 0 ? 1 : (which == 1 ? -1 : 0);
+                    if (!CookieSitePolicy.setOverride(pref, url, newMode)) {
+                        Toast.makeText(MainActivity.this, "保存できませんでした", Toast.LENGTH_SHORT).show();
+                        dialog.dismiss();
+                        return;
+                    }
+                    applyThirdPartyCookiesFor(current, url);
+                    cookiePolicyStamp = computeCookiePolicyStamp();
+                    dialog.dismiss();
+                    if (pending == null) {
+                        current.reload();
+                    }
+                    Toast.makeText(MainActivity.this, "設定を反映しました", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("閉じる", null)
+                .show();
     }
 
     private WebView createNewWebView() {
@@ -1680,6 +1869,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         webView.addJavascriptInterface(blobDownloadBridge, "BlobDownloader");
         PluginRuntime.attach(this, webView);
         AdBlockEngine.attach(webView);
+        CookieGate.attach(webView, this::onCookieGateRequest);
         WebViewOptimizationUtils.installClientCompat(webView);
         SafeBrowsingSupport.recordSafePage(webView, START_PAGE);
 
@@ -1924,12 +2114,25 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 return BrowserUrlRouter.handleUrlLoading(MainActivity.this, view, url, true);
             }
             @Override
+            public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+                super.doUpdateVisitedHistory(view, url, isReload);
+                if (isReload || url == null || url.isEmpty() || view != getCurrentWebView()) {
+                    return;
+                }
+                if (loadedPages.contains(view)) {
+                    scheduleSpaHistoryUpdate(view, url);
+                }
+            }
+            @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                loadedPages.remove(view);
+                cookiePrompted.remove(view);
                 PageTranslator.onPageStarted(view);
                 SafeBrowsingSupport.recordNavigation(view, url);
                 ExternalDownloadTabTracker.onPageStarted(view, url);
                 PluginRuntime.onPageStarted(view, url);
                 AdBlockEngine.onPageStarted(view);
+                applyThirdPartyCookiesFor(view, url);
                 if (findController != null) {
                     findController.onPageStarted(view);
                 }
@@ -1956,6 +2159,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
             }
             @Override
             public void onPageFinished(WebView view, String url) {
+                loadedPages.add(view);
                 ExternalDownloadTabTracker.onPageFinished(view, url);
                 if (findController != null) {
                     findController.onPageFinished(view);
@@ -2049,6 +2253,17 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                     return false;
                 }
                 final WebView transportWebView = new WebView(MainActivity.this);
+                final boolean[] transportDestroyed = new boolean[1];
+                UiThread.postDelayed(() -> {
+                    if (!transportDestroyed[0]) {
+                        transportDestroyed[0] = true;
+                        try {
+                            transportWebView.stopLoading();
+                            transportWebView.destroy();
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }, 20000L);
                 WebSettings transportSettings = transportWebView.getSettings();
                 transportSettings.setAllowFileAccess(false);
                 transportSettings.setAllowContentAccess(false);
@@ -2058,6 +2273,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                     @Override
                     public boolean onRenderProcessGone(WebView v, android.webkit.RenderProcessGoneDetail detail) {
                         SafeBrowsingSupport.clear(v);
+                        transportDestroyed[0] = true;
                         try {
                             android.view.ViewParent parent = v.getParent();
                             if (parent instanceof ViewGroup) {
@@ -2099,9 +2315,12 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                         if (!handled) {
                             createNewTab(targetUrl);
                         }
-                        try {
-                            transportWebView.destroy();
-                        } catch (Exception ignored) {
+                        if (!transportDestroyed[0]) {
+                            transportDestroyed[0] = true;
+                            try {
+                                transportWebView.destroy();
+                            } catch (Exception ignored) {
+                            }
                         }
                         return true;
                     }
@@ -2954,6 +3173,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 } catch (Exception ignored) {
                 }
             }
+            clearPendingSpaHistory(webView);
             pullToRefreshEligibleCache.remove(webView);
             pendingTabs.remove(webView);
             tabHistoryStates.remove(webView);
@@ -3682,6 +3902,9 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                         if (owner != getCurrentWebView()) {
                             return;
                         }
+                        if (!BridgeGuard.acceptReportedUrl(owner.getUrl(), url)) {
+                            return;
+                        }
                         scheduleSpaHistoryUpdate(owner, url);
                         DesktopContentOptimizer.apply(owner, deskuaEnabled);
                     } catch (Exception ignored) {}
@@ -3817,8 +4040,6 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
             startActivity(new Intent(MainActivity.this, PluginManagerActivity.class));
         } else if (id == R.id.action_plugin_commands) {
             showPluginCommands();
-        } else if (id == R.id.action_exec) {
-            startActivity(new Intent(MainActivity.this, exec.class));
         } else if (id == R.id.action_downloads) {
             startActivity(new Intent(MainActivity.this, DownloadHistoryActivity.class));
         } else if (id == R.id.action_qr) {
@@ -3986,17 +4207,27 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
             clearTabs();
         } else if (id == R.id.action_screenshot) {
             takeScreenshot();
+        } else if (id == R.id.action_site_third_party_cookies) {
+            showSiteThirdPartyCookieDialog();
+            return true;
         } else if (id == R.id.action_export_all_cookies_zip) {
-            ArrayList<WebView> tabList;
-            ArrayList<String> urlList = new ArrayList<>();
-            synchronized (webViews) {
-                tabList = new ArrayList<>(webViews);
-                for (WebView tab : tabList) {
-                    PendingTab pending = pendingTabs.get(tab);
-                    urlList.add(pending != null ? pending.url : tab.getUrl());
-                }
-            }
-            AllTabsCookiesZipExporter.export(this, tabList, urlList);
+            new AlertDialog.Builder(this)
+                    .setTitle("全タブのCookieを書き出しますか?")
+                    .setMessage("出力されるzipにはログイン状態(セッション)を再現できるCookieが含まれます。他人に渡すとアカウントを乗っ取られる恐れがあります。保存先はダウンロードフォルダです。")
+                    .setPositiveButton("書き出す", (dialog, which) -> {
+                        ArrayList<WebView> tabList;
+                        ArrayList<String> urlList = new ArrayList<>();
+                        synchronized (webViews) {
+                            tabList = new ArrayList<>(webViews);
+                            for (WebView tab : tabList) {
+                                PendingTab pending = pendingTabs.get(tab);
+                                urlList.add(pending != null ? pending.url : tab.getUrl());
+                            }
+                        }
+                        AllTabsCookiesZipExporter.export(MainActivity.this, tabList, urlList);
+                    })
+                    .setNegativeButton("キャンセル", null)
+                    .show();
             return true;
         }
         return super.onOptionsItemSelected(item);
@@ -4576,7 +4807,7 @@ private void saveScreenshot(Bitmap bitmap) {
         
         
         
-        int maxPreviewWidth = 480;
+        int maxPreviewWidth = 360;
         float scale = width > maxPreviewWidth ? (float) maxPreviewWidth / (float) width : 1f;
         int targetWidth = Math.max(1, Math.round(width * scale));
         int targetHeight = Math.max(1, Math.round(height * scale));
@@ -4601,6 +4832,22 @@ private void saveScreenshot(Bitmap bitmap) {
 
         tabSnapshots.put(webView, snapshot);
         dirtySnapshotTabs.add(webView);
+        trimSnapshotMemory(webView);
+    }
+
+    private void trimSnapshotMemory(WebView keep) {
+        if (tabSnapshots.size() <= MAX_MEMORY_SNAPSHOTS) {
+            return;
+        }
+        java.util.Iterator<Map.Entry<WebView, Bitmap>> it = tabSnapshots.entrySet().iterator();
+        while (it.hasNext() && tabSnapshots.size() > MAX_MEMORY_SNAPSHOTS) {
+            Map.Entry<WebView, Bitmap> entry = it.next();
+            WebView owner = entry.getKey();
+            if (owner == keep || dirtySnapshotTabs.contains(owner)) {
+                continue;
+            }
+            it.remove();
+        }
     }
 
 
@@ -5297,6 +5544,7 @@ private void addHistory(String url, String title) {
         }
         name = name.trim();
         name = FILE_NAME_ILLEGAL.matcher(name).replaceAll("_");
+        name = DownloadSupport.sanitizeFileName(name);
         name = FILE_NAME_TRAILING.matcher(name).replaceAll("");
         if (name.isEmpty()) {
             name = "download_" + System.currentTimeMillis();

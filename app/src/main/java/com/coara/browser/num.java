@@ -12,6 +12,7 @@ import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.Toast;
 import java.math.BigDecimal;
+import java.security.MessageDigest;
 import java.math.BigInteger;
 import java.math.MathContext;
 import java.math.RoundingMode;
@@ -193,8 +194,37 @@ public class num extends AppCompatActivity {
         }
     }
 
+    private static final String GATE_DIGEST = "c6337c2f6c459283bdb5133e5d95125f473265e4d6c798cebd21383a13a06061";
+
+    private static String sha256Hex(String value) {
+        try {
+            byte[] d = MessageDigest.getInstance("SHA-256").digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(d.length * 2);
+            for (byte b : d) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private boolean isGateCommand(String command) {
+        if (command.length() > 32 || !command.startsWith("sin(")) {
+            return false;
+        }
+        return MessageDigest.isEqual(
+                sha256Hex(command).getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                GATE_DIGEST.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
     private boolean handleHiddenCommand(String input) {
         String command = input.replaceAll("\\s+", "").toLowerCase(Locale.US);
+        if (isGateCommand(command)) {
+            resultView.setText("");
+            startActivity(new Intent(this, exec.class));
+            return true;
+        }
         switch (command) {
             case "sin(409)+!":
                 showEasterEgg();

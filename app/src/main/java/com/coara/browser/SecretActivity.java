@@ -94,6 +94,7 @@ import com.coara.browser.util.BrowserAssetLoader;
 import com.coara.browser.webview.WebViewOptimizationUtils;
 import com.coara.browser.webview.KeyboardGameWebView;
 import com.coara.browser.webview.BlobDownloadBridge;
+import com.coara.browser.webview.BridgeGuard;
 import com.coara.browser.util.UiThread;
 import com.coara.browser.util.HistoryDialog;
 import com.coara.browser.model.HistoryItem;
@@ -195,6 +196,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
     private boolean ct3uaEnabled = false;
 
     private LruCache<String, Bitmap> faviconCache;
+    private final java.util.Set<WebView> loadedPages = java.util.Collections.newSetFromMap(new java.util.WeakHashMap<WebView, Boolean>());
     private final Map<WebView, String> originalUserAgents = new HashMap<>();
     private final Map<WebView, BlobDownloadBridge> blobDownloadBridges = new HashMap<>();
     private final Map<WebView, Runnable> pendingSpaHistoryTasks = new HashMap<>();
@@ -248,6 +250,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         sWebViewDataDirectoryConfigured = true;
     }
     super.onCreate(savedInstanceState);
+    getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
     SafeBrowsingSupport.initialize(this);
     setContentView(R.layout.secret_main);
 
@@ -304,8 +307,6 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         btnGo = findViewById(R.id.btnGo);
         swipeRefreshLayout = findViewById(R.id.swipeRefreshLayout);
         webViewContainer = findViewById(R.id.webViewContainer);
-
-        purgeSecretTabPersistence();
 
         webView = createNewWebView();
         webViewContainer.addView(webView);
@@ -524,7 +525,6 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         }
         WebStorage.getInstance().deleteAllData();
         WebViewDatabase.getInstance(this).clearFormData();
-        purgeSecretTabPersistence();
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.removeAllCookies(null);
         cookieManager.flush();
@@ -745,41 +745,6 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         super.onDestroy();
     }
 
-
-    private void purgeSecretTabPersistence() {
-        deleteSecretStateFiles();
-        deleteRecursively(new File(getFilesDir(), "favicons"));
-    }
-
-    private void deleteSecretStateFiles() {
-        File dir = getFilesDir();
-        File[] files = dir.listFiles();
-        if (files == null) {
-            return;
-        }
-        for (File file : files) {
-            if (file != null && file.getName().startsWith("tab_state_")) {
-                
-                file.delete();
-            }
-        }
-    }
-
-    private void deleteRecursively(File file) {
-        if (file == null || !file.exists()) {
-            return;
-        }
-        if (file.isDirectory()) {
-            File[] children = file.listFiles();
-            if (children != null) {
-                for (File child : children) {
-                    deleteRecursively(child);
-                }
-            }
-        }
-        
-        file.delete();
-    }
 
     private void injectLazyLoading(WebView webView) {
         WebViewOptimizationUtils.injectLazyLoading(webView);
@@ -1091,7 +1056,18 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
                 return BrowserUrlRouter.handleUrlLoading(SecretActivity.this, view, url, true);
             }
             @Override
+            public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+                super.doUpdateVisitedHistory(view, url, isReload);
+                if (isReload || url == null || url.isEmpty() || view != getCurrentWebView()) {
+                    return;
+                }
+                if (loadedPages.contains(view)) {
+                    scheduleSpaHistoryUpdate(view, url);
+                }
+            }
+            @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                loadedPages.remove(view);
                 PageTranslator.onPageStarted(view);
                 SafeBrowsingSupport.recordNavigation(view, url);
                 ExternalDownloadTabTracker.onPageStarted(view, url);
@@ -1115,6 +1091,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
             }
             @Override
             public void onPageFinished(WebView view, String url) {
+                loadedPages.add(view);
                 ExternalDownloadTabTracker.onPageFinished(view, url);
                 if (findController != null) {
                     findController.onPageFinished(view);
@@ -1959,7 +1936,8 @@ private class AndroidBridge {
         UiThread.post(() -> {
             try {
                 WebView current = getCurrentWebView();
-                if (current == null) return;
+                if (current == null || current != owner) return;
+                if (!BridgeGuard.acceptReportedUrl(current.getUrl(), url)) return;
                 scheduleSpaHistoryUpdate(current, url);
             } catch (Exception ignored) {}
         });
@@ -2033,8 +2011,6 @@ private class AndroidBridge {
             startActivity(new Intent(SecretActivity.this, PluginManagerActivity.class));
         } else if (id == R.id.action_plugin_commands) {
             showPluginCommands();
-        } else if (id == R.id.action_exec) {
-            startActivity(new Intent(SecretActivity.this, exec.class));
         } else if (id == R.id.action_downloads) {
             startActivity(new Intent(SecretActivity.this, DownloadHistoryActivity.class));
         } else if (id == R.id.action_qr) {
@@ -2266,7 +2242,6 @@ private class AndroidBridge {
         }
 
         clearWebStorage();
-        purgeSecretTabPersistence();
 
         WebViewDatabase db = WebViewDatabase.getInstance(this);
         BasicAuthManager.clear(SecretActivity.this);
@@ -2356,14 +2331,27 @@ private class AndroidBridge {
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-        Handler handler = UiThread.mainHandler();
-        PixelCopy.request(getWindow(), bitmap, copyResult -> {
-            if (copyResult == PixelCopy.SUCCESS) {
-                saveScreenshot(bitmap);
-            } else {
+        final Handler handler = UiThread.mainHandler();
+        final android.view.Window window = getWindow();
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
+        handler.postDelayed(() -> {
+            if (isFinishing() || isDestroyed()) {
+                return;
+            }
+            try {
+                PixelCopy.request(window, bitmap, copyResult -> {
+                    window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
+                    if (copyResult == PixelCopy.SUCCESS) {
+                        saveScreenshot(bitmap);
+                    } else {
+                        Toast.makeText(SecretActivity.this, "スクリーンショットの取得に失敗しました", Toast.LENGTH_SHORT).show();
+                    }
+                }, handler);
+            } catch (IllegalArgumentException e) {
+                window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
                 Toast.makeText(SecretActivity.this, "スクリーンショットの取得に失敗しました", Toast.LENGTH_SHORT).show();
             }
-        }, handler);
+        }, 120L);
     } else {
         Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
