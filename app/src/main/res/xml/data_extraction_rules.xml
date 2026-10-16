@@ -8,8 +8,12 @@
         <exclude domain="external" />
     </cloud-backup>
     <device-transfer>
-        <include domain="sharedpref" />
-        <include domain="file" />
-        <include domain="database" />
+        <include domain="sharedpref" path="." />
+        <exclude domain="sharedpref" path="SecretBrowserPrefs.xml" />
+        <exclude domain="sharedpref" path="coara_translate_secret.xml" />
+        <exclude domain="sharedpref" path="coara_exec.xml" />
+        <include domain="file" path="plugins" />
+        <include domain="file" path="background_image" />
+        <include domain="file" path="themes" />
     </device-transfer>
 </data-extraction-rules>
