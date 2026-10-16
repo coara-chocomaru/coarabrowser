@@ -9,7 +9,7 @@ android {
         minSdk = 24
         targetSdk = 31
         versionCode = 330
-        versionName = "4.4.4-3"
+        versionName = "4.4.4-2"
         multiDexEnabled = true
         if (project.hasProperty('bundleBuild')) {
             ndk {
