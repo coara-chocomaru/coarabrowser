@@ -63,7 +63,6 @@
             <item android:id="@+id/action_qr" android:title="QRコード" />
             <item android:id="@+id/action_num" android:title="電卓" />
             <item android:id="@+id/action_grep" android:title="grep-i/md5" />
-            <item android:id="@+id/action_exec" android:title="exec" />
         </menu>
     </item>
 

@@ -75,6 +75,7 @@
             <item android:id="@+id/action_adblock" android:title="AdBlock" android:checkable="true" app:showAsAction="never" />
             <item android:id="@+id/action_Secret" android:icon="@drawable/ic_dark_mode" android:title="シークレットモード" app:showAsAction="never" />
             <item android:id="@+id/action_pgdl" android:icon="@drawable/ic_page_download" android:title="ページ保存" app:showAsAction="never" />
+            <item android:id="@+id/action_site_third_party_cookies" android:title="サイト別サードパーティCookie" app:showAsAction="never" />
             <item android:id="@+id/action_export_all_cookies_zip" android:title="cookie保存" app:showAsAction="never" />
             <item android:id="@+id/action_basic_auth" android:icon="@drawable/ic_globe" android:title="basicモード" android:checkable="true" app:showAsAction="never" />
             <item android:id="@+id/action_plugins" android:title="拡張機能" app:showAsAction="never" />
@@ -85,7 +86,6 @@
             <item android:id="@+id/action_qr" android:icon="@drawable/ic_qrcode" android:title="QRコード" app:showAsAction="never" />
             <item android:id="@+id/action_num" android:icon="@drawable/ic_num" android:title="電卓" app:showAsAction="never" />
             <item android:id="@+id/action_grep" android:icon="@drawable/ic_copy" android:title="grep-i/md5" app:showAsAction="never" />
-            <item android:id="@+id/action_exec" android:icon="@drawable/ic_terminal" android:title="exec" app:showAsAction="never" />
         </menu>
     </item>
 
