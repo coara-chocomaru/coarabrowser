@@ -11,6 +11,11 @@ android {
         versionCode = 328
         versionName = "4.4.4-1"
         multiDexEnabled = true
+        if (project.hasProperty('bundleBuild')) {
+            ndk {
+                abiFilters 'arm64-v8a', 'armeabi-v7a'
+            }
+        }
         vectorDrawables.useSupportLibrary = true
         proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
     }
@@ -42,9 +47,14 @@ android {
         }
     }
 
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+
     splits {
         abi {
-            enable = true
+            enable = !project.hasProperty('bundleBuild')
             reset()
             include 'arm64-v8a', 'armeabi-v7a'
             universalApk = false
@@ -55,7 +65,7 @@ android {
         disable += ['ExpiredTargetSdkVersion', 'NewApi', 'Range', 'SetTextI18n', 'ScopedStorage', 'FieldCanBeLocal', 'GradleDependency']
     }
     packagingOptions {
-        excludes += "DebugProbesKt.bin"
+        excludes += ["DebugProbesKt.bin", "META-INF/*.version", "kotlin-tooling-metadata.json", "**/*.kotlin_builtins"]
     }
 }
 
@@ -64,12 +74,12 @@ tasks.withType(JavaCompile).configureEach {
 }
 
 dependencies {
-    implementation 'androidx.core:core:1.19.0'
+    implementation 'androidx.core:core:1.19.1'
     implementation 'androidx.startup:startup-runtime:1.2.0'
     implementation 'androidx.profileinstaller:profileinstaller:1.4.1'
     implementation 'io.noties.markwon:core:4.6.2'
     implementation 'com.google.zxing:core:3.5.4'
-    implementation 'androidx.emoji2:emoji2:1.6.0'
+    implementation 'androidx.emoji2:emoji2:1.7.0'
     implementation 'androidx.appcompat:appcompat:1.8.0'
     implementation 'com.google.android.material:material:1.14.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.2.2'
@@ -82,6 +92,6 @@ dependencies {
     implementation 'com.google.mlkit:language-id:17.0.6'
     implementation 'androidx.activity:activity:1.13.0'
     implementation 'androidx.viewpager2:viewpager2:1.1.0'
-    implementation 'androidx.fragment:fragment:1.9.0'
+    implementation 'androidx.fragment:fragment:1.9.1'
     coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
 }
