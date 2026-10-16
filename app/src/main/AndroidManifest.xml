@@ -212,7 +212,7 @@
             android:name=".pagedl"
             android:configChanges="keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
             android:noHistory="true"
-            android:exported="true" />
+            android:exported="false" />
         
         <activity
             android:name=".num"
@@ -223,17 +223,17 @@
         <activity
             android:name=".txtphoto"
             android:configChanges="keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
-            android:exported="true" />
+            android:exported="false" />
         
         <activity
             android:name=".asciiart"
             android:configChanges="keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
-            android:exported="true" />
+            android:exported="false" />
         
         <activity
             android:name=".QrCodeActivity"
             android:configChanges="keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
-            android:exported="true" />
+            android:exported="false" />
        
         <activity
             android:name=".plugin.PluginManagerActivity"
