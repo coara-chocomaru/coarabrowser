@@ -698,6 +698,16 @@ public final class PluginManager {
         return ref == null ? name : ref;
     }
 
+    private static String stripQueryAndFragment(String url) {
+        if (url == null) {
+            return "";
+        }
+        int q = url.indexOf('?');
+        int f = url.indexOf('#');
+        int cut = q < 0 ? f : (f < 0 ? q : Math.min(q, f));
+        return cut < 0 ? url : url.substring(0, cut);
+    }
+
     private boolean xhrStart(PluginInfo p, String reqId, String optsJson) {
         if (reqId == null || reqId.isEmpty() || reqId.length() > 40 || optsJson == null) {
             return false;
@@ -726,7 +736,7 @@ public final class PluginManager {
         xhrs.put(key, state);
         final List<String> connects = new ArrayList<>(p.connects);
         final String pid = p.id;
-        final String shownUrl = isSecretProcess() ? "(secret)" : opts.optString("url", "");
+        final String shownUrl = isSecretProcess() ? "(secret)" : stripQueryAndFragment(opts.optString("url", ""));
         xhrPool.execute(new Runnable() {
             @Override
             public void run() {
