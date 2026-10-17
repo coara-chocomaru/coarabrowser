@@ -1916,11 +1916,7 @@ private class AndroidBridge {
     }
     @JavascriptInterface
     public void touchpadNative(final int kind, final float a, final float b) {
-        UiThread.post(() -> {
-            try {
-                TouchpadController.onHostRequest(owner, kind, a, b);
-            } catch (Exception ignored) {}
-        });
+        TouchpadController.postHostRequest(owner, kind, a, b);
     }
     @JavascriptInterface
     public void onPointerLockChanged(final boolean locked) {

@@ -3861,14 +3861,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         }
         @JavascriptInterface
         public void touchpadNative(final int kind, final float a, final float b) {
-            UiThread.post(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        TouchpadController.onHostRequest(owner, kind, a, b);
-                    } catch (Exception ignored) {}
-                }
-            });
+            TouchpadController.postHostRequest(owner, kind, a, b);
         }
 
         @JavascriptInterface
