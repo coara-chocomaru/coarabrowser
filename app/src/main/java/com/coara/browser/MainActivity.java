@@ -259,7 +259,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
     private View customView = null;
     private WebChromeClient.CustomViewCallback customViewCallback = null;
     private final Map<WebView, Bitmap> tabSnapshots = new LinkedHashMap<>();
-    private static final int MAX_MEMORY_SNAPSHOTS = 10;
+    private static final int MAX_MEMORY_SNAPSHOTS = 8;
     private final Map<WebView, Runnable> pendingSpaHistoryTasks = new HashMap<>();
     
     
@@ -374,7 +374,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         deskuaEnabled = pref.getBoolean(KEY_DESKUA_ENABLED, false);
         ct3uaEnabled = pref.getBoolean(KEY_CT3UA_ENABLED, false);
         final int maxMemory = (int)(Runtime.getRuntime().maxMemory() / 1024);
-        final int cacheSize = Math.max(1024, Math.min(maxMemory / 16, 8 * 1024));
+        final int cacheSize = Math.max(512, Math.min(maxMemory / 32, 4 * 1024));
         faviconCache = new LruCache<String, Bitmap>(cacheSize) {
             @Override
             protected int sizeOf(String key, Bitmap bitmap) {
@@ -511,7 +511,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
 
         swipeRefreshLayout.setOnChildScrollUpCallback((parent1, child) -> {
             WebView current = getCurrentWebView();
-            if (current == null) return true;
+            if (current == null || TouchpadController.isScreenTouchBlocked()) return true;
             Boolean cached = pullToRefreshEligibleCache.get(current);
             if (cached == null) {
                 
@@ -1697,11 +1697,12 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 replyStorageAccess(reply, message, storageAccess, true);
                 return;
             }
-            if (CookieSitePolicy.isAllowed(pref, topUrl)) {
+            int siteCookieOverride = CookieSitePolicy.override(pref, topUrl);
+            if (siteCookieOverride > 0 || (siteCookieOverride == 0 && CookieSitePolicy.globalAllowed(pref))) {
                 replyStorageAccess(reply, message, storageAccess, true);
                 return;
             }
-            if (CookieSitePolicy.override(pref, topUrl) < 0) {
+            if (siteCookieOverride < 0) {
                 replyStorageAccess(reply, message, storageAccess, false);
                 return;
             }
@@ -1799,7 +1800,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         originalUserAgents.put(webView, defaultUA);
         applyOptimizedSettings(settings);
         WebViewOptimizationUtils.enableBackForwardCache(settings);
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
+        if (WebViewOptimizationUtils.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
             WebSettingsCompat.setSafeBrowsingEnabled(settings, true);
         }
         applyCookiePolicy(webView);
@@ -2178,8 +2179,10 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                             if (!SpaStateManager.getInstance().isSpa(view)) {
                                 WebViewOptimizationUtils.injectSpaProbe(view);
                             }
-                            DesktopContentOptimizer.apply(view, deskuaEnabled);
-                            BrowserThemeManager.applyToWebView(view, MainActivity.this);
+                            if (view == getCurrentWebView()) {
+                                DesktopContentOptimizer.apply(view, deskuaEnabled);
+                                BrowserThemeManager.applyToWebView(view, MainActivity.this);
+                            }
                         }
                     } catch (Exception ignored) {
                     }
@@ -4609,7 +4612,7 @@ private void saveScreenshot(Bitmap bitmap) {
     private void updateDarkMode() {
         for (WebView webView : webViews) {
             WebSettings settings = webView.getSettings();
-            if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+            if (WebViewOptimizationUtils.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
                 WebSettingsCompat.setForceDark(settings, darkModeEnabled ?
                         WebSettingsCompat.FORCE_DARK_ON : WebSettingsCompat.FORCE_DARK_OFF);
             }
@@ -5358,12 +5361,13 @@ private void addHistory(String url, String title) {
     }
 
     private Bitmap fetchFavicon(String bookmarkUrl) {
+        HttpURLConnection connection = null;
         try {
             URL urlObj = new URL(bookmarkUrl);
             String protocol = urlObj.getProtocol();
             String host = urlObj.getHost();
             String faviconUrl = protocol + "://" + host + "/favicon.ico";
-            HttpURLConnection connection = (HttpURLConnection) new URL(faviconUrl).openConnection();
+            connection = (HttpURLConnection) new URL(faviconUrl).openConnection();
             connection.setConnectTimeout(3000);
             connection.setReadTimeout(3000);
             connection.setRequestMethod("GET");
@@ -5375,6 +5379,10 @@ private void addHistory(String url, String title) {
             }
         } catch (Exception e) {
             e.printStackTrace();
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
         }
         return null;
     }
@@ -5399,12 +5407,20 @@ private void addHistory(String url, String title) {
             faviconsDir.mkdirs();
         }
         File file = new File(faviconsDir, getFaviconFilename(url));
-        try (FileOutputStream fos = new FileOutputStream(file)) {
-            bitmap.compress(Bitmap.CompressFormat.PNG, 50, fos);
-        } catch (IOException e) {
-            e.printStackTrace();
+        synchronized (FAVICON_WRITE_LOCK) {
+            File temp = new File(faviconsDir, file.getName() + ".tmp");
+            boolean written = false;
+            try (FileOutputStream fos = new FileOutputStream(temp)) {
+                written = bitmap.compress(Bitmap.CompressFormat.PNG, 50, fos);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            if (!written || !temp.renameTo(file)) {
+                temp.delete();
+            }
         }
     }
+    private static final Object FAVICON_WRITE_LOCK = new Object();
     private void loadFaviconFromDisk(String url) {
         File faviconsDir = new File(getFilesDir(), "favicons");
         File file = new File(faviconsDir, getFaviconFilename(url));

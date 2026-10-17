@@ -779,11 +779,11 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             settings.setOffscreenPreRaster(false);
         }
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+        if (WebViewOptimizationUtils.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
             WebSettingsCompat.setForceDark(settings, darkModeEnabled ?
                     WebSettingsCompat.FORCE_DARK_ON : WebSettingsCompat.FORCE_DARK_OFF);
         }
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
+        if (WebViewOptimizationUtils.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
             WebSettingsCompat.setRequestedWithHeaderOriginAllowList(settings, java.util.Collections.emptySet());
         }
     }
@@ -812,7 +812,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         String defaultUA = WebViewOptimizationUtils.sanitizeUserAgent(settings.getUserAgentString());
         originalUserAgents.put(webView, defaultUA);
         applyOptimizedSettings(settings);
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
+        if (WebViewOptimizationUtils.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
             WebSettingsCompat.setSafeBrowsingEnabled(settings, true);
         }
         settings.setUserAgentString(defaultUA);
@@ -2392,7 +2392,7 @@ private void saveScreenshot(Bitmap bitmap) {
             return;
         }
         WebSettings settings = current.getSettings();
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+        if (WebViewOptimizationUtils.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
             WebSettingsCompat.setForceDark(settings, darkModeEnabled ?
                     WebSettingsCompat.FORCE_DARK_ON : WebSettingsCompat.FORCE_DARK_OFF);
         }
