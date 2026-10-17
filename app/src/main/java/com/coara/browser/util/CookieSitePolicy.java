@@ -34,22 +34,20 @@ public final class CookieSitePolicy {
         }
     }
 
-    private static boolean matches(Set<String> sites, String host) {
+    private static int matchingLength(Set<String> sites, String host) {
         if (sites == null || sites.isEmpty() || host.isEmpty()) {
-            return false;
+            return -1;
         }
-        if (sites.contains(host)) {
-            return true;
-        }
-        int dot = host.indexOf('.');
-        while (dot >= 0 && dot < host.length() - 1) {
-            host = host.substring(dot + 1);
-            if (sites.contains(host)) {
-                return true;
+        int best = -1;
+        for (String site : sites) {
+            if (site == null || site.isEmpty()) {
+                continue;
             }
-            dot = host.indexOf('.');
+            if (host.equals(site) || host.endsWith("." + site)) {
+                best = Math.max(best, site.length());
+            }
         }
-        return false;
+        return best;
     }
 
     public static boolean globalAllowed(SharedPreferences pref) {
@@ -57,21 +55,11 @@ public final class CookieSitePolicy {
     }
 
     public static boolean isAllowed(SharedPreferences pref, String url) {
-        boolean global = globalAllowed(pref);
-        if (pref == null) {
-            return global;
+        int siteMode = override(pref, url);
+        if (siteMode != 0) {
+            return siteMode > 0;
         }
-        String host = hostOf(url);
-        if (host.isEmpty()) {
-            return global;
-        }
-        if (matches(pref.getStringSet(KEY_BLOCK_SITES, null), host)) {
-            return false;
-        }
-        if (matches(pref.getStringSet(KEY_ALLOW_SITES, null), host)) {
-            return true;
-        }
-        return global;
+        return globalAllowed(pref);
     }
 
     public static int override(SharedPreferences pref, String url) {
@@ -82,15 +70,15 @@ public final class CookieSitePolicy {
         if (host.isEmpty()) {
             return 0;
         }
-        Set<String> block = pref.getStringSet(KEY_BLOCK_SITES, null);
-        if (block != null && block.contains(host)) {
-            return -1;
+        int allowLength = matchingLength(pref.getStringSet(KEY_ALLOW_SITES, null), host);
+        int blockLength = matchingLength(pref.getStringSet(KEY_BLOCK_SITES, null), host);
+        if (allowLength < 0 && blockLength < 0) {
+            return 0;
         }
-        Set<String> allow = pref.getStringSet(KEY_ALLOW_SITES, null);
-        if (allow != null && allow.contains(host)) {
+        if (allowLength > blockLength) {
             return 1;
         }
-        return 0;
+        return -1;
     }
 
     public static boolean setOverride(SharedPreferences pref, String url, int mode) {
