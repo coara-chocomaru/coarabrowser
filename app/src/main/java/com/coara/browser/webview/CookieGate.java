@@ -25,7 +25,7 @@ public final class CookieGate {
             + "if(window.top===window)return;"
             + "var o=window.CoaraCookieGate;"
             + "if(!o||typeof o.postMessage!=='function')return;"
-            + "var sent=0,seq=0,cnt=0,wait={},seen={};"
+            + "var sent=0,seq=0,cnt=0,wait=Object.create(null),seen=Object.create(null),seenCount=0;"
             + "var send=function(k){if(sent>=2)return;sent++;try{o.postMessage(k);}catch(e){}};"
             + "o.onmessage=function(ev){try{"
             + "var d=String(ev.data),i=d.indexOf(':');if(i<1)return;"
@@ -40,16 +40,16 @@ public final class CookieGate {
             + "D.set.call(this,v);"
             + "if(sent>=2)return;"
             + "try{"
-            + "if(++cnt>64){sent=2;return;}"
             + "var s=String(v),n=s.split(';')[0],q=n.indexOf('='),nm=(q<0?n:n.slice(0,q)).trim();"
             + "if(!nm||seen[nm])return;"
-            + "seen[nm]=1;"
             + "if(/max-age\\s*=\\s*(0|-)|expires\\s*=[^;]*(1970|1969)/i.test(s))return;"
             + "if(/;\\s*secure/i.test(s)&&location.protocol!=='https:')return;"
             + "var dm=/;\\s*domain\\s*=\\s*\\.?([^;\\s]+)/i.exec(s);"
             + "if(dm){var h=String(location.hostname).toLowerCase(),dd=dm[1].toLowerCase();"
             + "if(h!==dd&&h.slice(-dd.length-1)!=='.'+dd)return;}"
-            + "var c=D.get.call(this);"
+            + "if(++cnt>256){sent=2;return;}"
+            + "if(seenCount<256){seen[nm]=1;seenCount++;}"
+            + "var c=D.get.call(this)||'';"
             + "if((';'+c.replace(/;\\s*/g,';')).indexOf(';'+nm+'=')<0)send('c');"
             + "}catch(e){}"
             + "}});"
@@ -74,8 +74,8 @@ public final class CookieGate {
             return false;
         }
         try {
-            if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
-                    || !WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            if (!WebViewOptimizationUtils.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
+                    || !WebViewOptimizationUtils.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 return false;
             }
             WebViewCompat.addWebMessageListener(view, BRIDGE_NAME, Collections.singleton("*"),

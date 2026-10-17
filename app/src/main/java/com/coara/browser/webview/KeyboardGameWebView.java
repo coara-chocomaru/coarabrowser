@@ -16,6 +16,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 
 import com.coara.browser.util.CacheModePolicy;
+import com.coara.browser.util.TouchpadController;
 
 import java.util.Map;
 
@@ -155,6 +156,35 @@ public class KeyboardGameWebView extends WebView {
         if (keyboardMode == CHAR_MODE_ENGLISH) {
             outAttrs.imeOptions |= EditorInfo.IME_FLAG_FORCE_ASCII;
         }
+    }
+
+    private boolean fingerGestureActive;
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        if (event == null) {
+            return false;
+        }
+        if (TouchpadController.shouldDropScreenTouch()) {
+            if (fingerGestureActive) {
+                fingerGestureActive = false;
+                MotionEvent cancel = MotionEvent.obtain(event);
+                cancel.setAction(MotionEvent.ACTION_CANCEL);
+                try {
+                    super.dispatchTouchEvent(cancel);
+                } finally {
+                    cancel.recycle();
+                }
+            }
+            return true;
+        }
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            fingerGestureActive = true;
+        } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            fingerGestureActive = false;
+        }
+        return super.dispatchTouchEvent(event);
     }
 
     @Override

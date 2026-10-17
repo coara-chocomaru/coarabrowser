@@ -9,8 +9,33 @@ import androidx.webkit.WebSettingsCompat;
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
+import java.util.HashMap;
+import java.util.Map;
+
 public final class WebViewOptimizationUtils {
+    private static final Map<String, Boolean> FEATURE_SUPPORT_CACHE = new HashMap<>();
+
     private WebViewOptimizationUtils() {}
+
+    public static boolean isFeatureSupported(String feature) {
+        if (feature == null || feature.isEmpty()) {
+            return false;
+        }
+        synchronized (FEATURE_SUPPORT_CACHE) {
+            Boolean cached = FEATURE_SUPPORT_CACHE.get(feature);
+            if (cached != null) {
+                return cached;
+            }
+            boolean supported;
+            try {
+                supported = WebViewFeature.isFeatureSupported(feature);
+            } catch (Throwable ignored) {
+                supported = false;
+            }
+            FEATURE_SUPPORT_CACHE.put(feature, supported);
+            return supported;
+        }
+    }
 
     @SuppressWarnings("deprecation")
     public static void applyOptimizedSettings(WebSettings settings, boolean darkModeEnabled) {
@@ -44,7 +69,7 @@ public final class WebViewOptimizationUtils {
             settings.setLayoutAlgorithm(WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING);
         }
 
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+        if (isFeatureSupported(WebViewFeature.FORCE_DARK)) {
             WebSettingsCompat.setForceDark(
                     settings,
                     darkModeEnabled
@@ -52,13 +77,13 @@ public final class WebViewOptimizationUtils {
                             : WebSettingsCompat.FORCE_DARK_OFF
             );
         }
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK_STRATEGY)) {
+        if (isFeatureSupported(WebViewFeature.FORCE_DARK_STRATEGY)) {
             WebSettingsCompat.setForceDarkStrategy(
                     settings,
                     WebSettingsCompat.DARK_STRATEGY_PREFER_WEB_THEME_OVER_USER_AGENT_DARKENING
             );
         }
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
+        if (isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
             WebSettingsCompat.setRequestedWithHeaderOriginAllowList(settings, java.util.Collections.emptySet());
         }
     }
@@ -69,17 +94,12 @@ public final class WebViewOptimizationUtils {
             + "Object.defineProperty(window,'chrome',{value:{app:{isInstalled:false},csi:f,loadTimes:f},configurable:true,enumerable:true,writable:true});"
             + "}catch(e){}})();";
 
-    private static Boolean docStartSupported;
-
     public static void installClientCompat(WebView webView) {
         if (webView == null) {
             return;
         }
         try {
-            if (docStartSupported == null) {
-                docStartSupported = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT);
-            }
-            if (docStartSupported) {
+            if (isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 WebViewCompat.addDocumentStartJavaScript(webView, CLIENT_COMPAT_SCRIPT, java.util.Collections.singleton("*"));
             }
         } catch (Throwable ignored) {
@@ -91,8 +111,8 @@ public final class WebViewOptimizationUtils {
             return;
         }
         try {
-            if (WebViewFeature.isFeatureSupported(WebViewFeature.BACK_FORWARD_CACHE_SETTINGS)
-                    && WebViewFeature.isFeatureSupported(WebViewFeature.BACK_FORWARD_CACHE_SETTINGS_EXPERIMENTAL_V3)) {
+            if (isFeatureSupported(WebViewFeature.BACK_FORWARD_CACHE_SETTINGS)
+                    && isFeatureSupported(WebViewFeature.BACK_FORWARD_CACHE_SETTINGS_EXPERIMENTAL_V3)) {
                 BackForwardCacheSettings cacheSettings = WebSettingsCompat.getBackForwardCacheSettings(settings);
                 cacheSettings.setMaxPagesInCache(1);
                 cacheSettings.setTimeoutSeconds(60L);
@@ -100,7 +120,7 @@ public final class WebViewOptimizationUtils {
         } catch (RuntimeException ignored) {
         }
         try {
-            if (WebViewFeature.isFeatureSupported(WebViewFeature.BACK_FORWARD_CACHE)) {
+            if (isFeatureSupported(WebViewFeature.BACK_FORWARD_CACHE)) {
                 WebSettingsCompat.setBackForwardCacheEnabled(settings, true);
             }
         } catch (RuntimeException ignored) {
@@ -167,102 +187,87 @@ public final class WebViewOptimizationUtils {
         }
     }
 
+    private static final String SPA_HOOK_JS = "var hook=function(first){try{"
+            + "if(!window.__coaraHistoryHooked){"
+            + "window.__coaraHistoryHooked=true;"
+            + "window.__coaraLastHref=location.href;"
+            + "var nuc=function(force){"
+            + "var href=location.href;"
+            + "if(!force&&href===window.__coaraLastHref)return;"
+            + "window.__coaraLastHref=href;"
+            + "try{AndroidBridge.onUrlChange(href);}catch(ex){}"
+            + "};"
+            + "var ps=history.pushState;"
+            + "history.pushState=function(){var r=ps.apply(history,arguments);nuc(true);return r;};"
+            + "var rs=history.replaceState;"
+            + "history.replaceState=function(){var r=rs.apply(history,arguments);nuc(true);return r;};"
+            + "window.addEventListener('popstate',function(){nuc(true);});"
+            + "window.addEventListener('hashchange',function(){nuc(true);});"
+            + "if(first)nuc(true);"
+            + "}else{"
+            + "try{AndroidBridge.onUrlChange(location.href);}catch(ex2){}"
+            + "}"
+            + "}catch(hookErr){}};";
+
+    private static final String SPA_PROBE_JS = "javascript:(function(){"
+            + SPA_HOOK_JS
+            + "if(window.__coaraSpaDetected===true){"
+            + "try{AndroidBridge.onSpaDetected(true);}catch(qe){}"
+            + "hook(false);"
+            + "return;"
+            + "}"
+            + "var s=false;"
+            + "try{"
+            + "if(!s&&document.querySelector('[data-reactroot]'))s=true;"
+            + "if(!s&&document.getElementById('__next'))s=true;"
+            + "if(!s&&document.querySelector('[data-v-app]'))s=true;"
+            + "if(!s&&document.getElementById('__nuxt'))s=true;"
+            + "if(!s&&document.querySelector('[ng-version]'))s=true;"
+            + "if(!s){"
+            + "var root=document.getElementById('root')||document.getElementById('app');"
+            + "if(root&&root.childElementCount>3)s=true;"
+            + "}"
+            + "if(!s){"
+            + "var scr=document.querySelectorAll('script[src]'),bc=0;"
+            + "for(var j=0;j<scr.length;j++){"
+            + "var src=scr[j].getAttribute('src')||'';"
+            + "if(src.indexOf('.chunk.js')>-1||src.indexOf('.bundle.js')>-1"
+            + "||src.indexOf('/chunk.')>-1||src.indexOf('/bundle.')>-1)bc++;"
+            + "if(bc>=2){s=true;break;}"
+            + "}"
+            + "}"
+            + "if(!s){"
+            + "try{"
+            + "if(history.pushState.toString().indexOf('native code')===-1)s=true;"
+            + "}catch(pe){}"
+            + "}"
+            + "if(!s){"
+            + "var cs=document.querySelectorAll('canvas');"
+            + "for(var i=0;i<cs.length;i++){"
+            + "if(cs[i].offsetWidth>100&&cs[i].offsetHeight>100){s=true;break;}"
+            + "}"
+            + "}"
+            + "if(!s){"
+            + "try{"
+            + "var bs=window.getComputedStyle(document.body);"
+            + "if(bs.overflow==='hidden'||bs.overflowY==='hidden')s=true;"
+            + "}catch(ce){}"
+            + "}"
+            + "}catch(e){}"
+            + "hook(true);"
+            + "if(!s&&'serviceWorker' in navigator){"
+            + "try{"
+            + "navigator.serviceWorker.getRegistrations().then(function(r){"
+            + "if(r&&r.length>0){try{window.__coaraSpaDetected=true;}catch(se){}AndroidBridge.onSpaDetected(true);}"
+            + "}).catch(function(){});"
+            + "}catch(swe){}"
+            + "}"
+            + "if(s){try{window.__coaraSpaDetected=true;}catch(se){}}"
+            + "AndroidBridge.onSpaDetected(s);"
+            + "})();";
+
     public static void injectSpaProbe(WebView webView) {
-        String js = "javascript:(function(){"
-                + "if(window.__coaraSpaDetected===true){"
-                + "try{AndroidBridge.onSpaDetected(true);}catch(qe){}"
-                + "try{"
-                + "if(!window.__coaraHistoryHooked){"
-                + "window.__coaraHistoryHooked=true;"
-                + "window.__coaraLastHref=location.href;"
-                + "var nuc=function(force){"
-                + "var href=location.href;"
-                + "if(!force&&href===window.__coaraLastHref)return;"
-                + "window.__coaraLastHref=href;"
-                + "try{AndroidBridge.onUrlChange(href);}catch(ex){}"
-                + "};"
-                + "var ps=history.pushState;"
-                + "history.pushState=function(){var r=ps.apply(history,arguments);nuc(true);return r;};"
-                + "var rs=history.replaceState;"
-                + "history.replaceState=function(){var r=rs.apply(history,arguments);nuc(true);return r;};"
-                + "window.addEventListener('popstate',function(){nuc(true);});"
-                + "window.addEventListener('hashchange',function(){nuc(true);});"
-                + "}else{"
-                + "try{AndroidBridge.onUrlChange(location.href);}catch(ex2){}"
-                + "}"
-                + "}catch(hookErr2){}"
-                + "return;"
-                + "}"
-                + "var s=false;"
-                + "try{"
-                + "if(!s&&document.querySelector('[data-reactroot]'))s=true;"
-                + "if(!s&&document.getElementById('__next'))s=true;"
-                + "if(!s&&document.querySelector('[data-v-app]'))s=true;"
-                + "if(!s&&document.getElementById('__nuxt'))s=true;"
-                + "if(!s&&document.querySelector('[ng-version]'))s=true;"
-                + "if(!s){"
-                + "var root=document.getElementById('root')||document.getElementById('app');"
-                + "if(root&&root.childElementCount>3)s=true;"
-                + "}"
-                + "if(!s){"
-                + "var scr=document.querySelectorAll('script[src]'),bc=0;"
-                + "for(var j=0;j<scr.length;j++){"
-                + "var src=scr[j].getAttribute('src')||'';"
-                + "if(src.indexOf('.chunk.js')>-1||src.indexOf('.bundle.js')>-1"
-                + "||src.indexOf('/chunk.')>-1||src.indexOf('/bundle.')>-1)bc++;"
-                + "if(bc>=2){s=true;break;}"
-                + "}"
-                + "}"
-                + "if(!s){"
-                + "try{"
-                + "if(history.pushState.toString().indexOf('native code')===-1)s=true;"
-                + "}catch(pe){}"
-                + "}"
-                + "if(!s){"
-                + "var cs=document.querySelectorAll('canvas');"
-                + "for(var i=0;i<cs.length;i++){"
-                + "if(cs[i].offsetWidth>100&&cs[i].offsetHeight>100){s=true;break;}"
-                + "}"
-                + "}"
-                + "if(!s){"
-                + "try{"
-                + "var bs=window.getComputedStyle(document.body);"
-                + "if(bs.overflow==='hidden'||bs.overflowY==='hidden')s=true;"
-                + "}catch(ce){}"
-                + "}"
-                + "}catch(e){}"
-                + "try{"
-                + "if(!window.__coaraHistoryHooked){"
-                + "window.__coaraHistoryHooked=true;"
-                + "window.__coaraLastHref=location.href;"
-                + "var notifyUrlChange=function(force){"
-                + "var href=location.href;"
-                + "if(!force&&href===window.__coaraLastHref)return;"
-                + "window.__coaraLastHref=href;"
-                + "try{AndroidBridge.onUrlChange(href);}catch(ex){}"
-                + "};"
-                + "var pushState=history.pushState;"
-                + "history.pushState=function(){var r=pushState.apply(history,arguments);notifyUrlChange(true);return r;};"
-                + "var replaceState=history.replaceState;"
-                + "history.replaceState=function(){var r=replaceState.apply(history,arguments);notifyUrlChange(true);return r;};"
-                + "window.addEventListener('popstate',function(){notifyUrlChange(true);});"
-                + "window.addEventListener('hashchange',function(){notifyUrlChange(true);});"
-                + "notifyUrlChange(true);"
-                + "}else{"
-                + "try{AndroidBridge.onUrlChange(location.href);}catch(ex2){}"
-                + "}"
-                + "}catch(hookErr){}"
-                + "if('serviceWorker' in navigator){"
-                + "try{"
-                + "navigator.serviceWorker.getRegistrations().then(function(r){"
-                + "if(r&&r.length>0){AndroidBridge.onSpaDetected(true);}"
-                + "}).catch(function(){});"
-                + "}catch(swe){}"
-                + "}"
-                + "if(s){try{window.__coaraSpaDetected=true;}catch(se){}}"
-                + "AndroidBridge.onSpaDetected(s);"
-                + "})();";
-        webView.evaluateJavascript(js, null);
+        webView.evaluateJavascript(SPA_PROBE_JS, null);
     }
 
     public static void injectLazyLoading(WebView webView) {
