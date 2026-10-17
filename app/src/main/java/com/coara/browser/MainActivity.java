@@ -1704,15 +1704,15 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
             }
             COOKIE_PROMPTED_SITES.add(promptKey);
             cookiePromptShowing = true;
-            final String text = frameHost + (storageAccess
-                    ? " がCookieへのアクセスを求めています。"
-                    : " がCookieを保存しようとしましたが、現在ブロックされています。")
-                    + "\n\n表示中のサイト: " + topHost
-                    + "\n\n許可すると、このサイト(" + topHost + ")ではサードパーティCookieが有効になります。"
+            final String text = (storageAccess
+                    ? "表示中のサイト「" + topHost + "」に埋め込まれたコンテンツが、Cookieへのアクセスを要求しています。"
+                    : "表示中のサイト「" + topHost + "」で、サードパーティCookieの保存要求を検知しました。")
+                    + "\n\n設定対象のサイト: " + topHost
+                    + "\n\n許可すると、このサイトではサードパーティCookieが有効になります。"
                     + "WebViewの仕様上、埋め込み元ごとの個別許可ではなく、表示中のサイト単位で適用されます。"
                     + "\n\nこの表示サイトの確認は、このアプリの起動中は繰り返しません。";
             new AlertDialog.Builder(this)
-                    .setTitle("サードパーティCookieの要求")
+                    .setTitle("サードパーティCookie: " + topHost)
                     .setMessage(text)
                     .setCancelable(true)
                     .setPositiveButton("このサイトで許可", (d, w) -> {
