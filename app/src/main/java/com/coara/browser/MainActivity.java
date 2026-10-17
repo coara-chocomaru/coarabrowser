@@ -4295,7 +4295,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         new AlertDialog.Builder(MainActivity.this)
                 .setTitle("クッキーを消去")
                 .setMessage("一時クッキーを全て消しますか？")
-                .setPositiveButton("はい", (dialog, which) -> {
+                .setNegativeButton("はい", (dialog, which) -> {
                     try {
                         CookieManager cookieManager = CookieManager.getInstance();
                         cookieManager.removeAllCookies(removed -> {
@@ -4309,7 +4309,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                         Toast.makeText(MainActivity.this, "クッキーを消去できませんでした", Toast.LENGTH_SHORT).show();
                     }
                 })
-                .setNegativeButton("いいえ", null)
+                .setPositiveButton("いいえ", null)
                 .show();
     }
 
@@ -4317,7 +4317,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         new AlertDialog.Builder(MainActivity.this)
                 .setTitle("キャッシュを消去")
                 .setMessage("一時キャッシュを全て消しますか？")
-                .setPositiveButton("はい", (dialog, which) -> {
+                .setNegativeButton("はい", (dialog, which) -> {
                     ArrayList<WebView> all;
                     synchronized (webViews) {
                         all = new ArrayList<>(webViews);
@@ -4340,7 +4340,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                         Toast.makeText(MainActivity.this, "キャッシュを消去するWebViewがありませんでした", Toast.LENGTH_SHORT).show();
                     }
                 })
-                .setNegativeButton("いいえ", null)
+                .setPositiveButton("いいえ", null)
                 .show();
     }
 
@@ -4348,7 +4348,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         new AlertDialog.Builder(MainActivity.this)
                 .setTitle("フォーム履歴を消去")
                 .setMessage("フォームの入力履歴を全て消しますか？")
-                .setPositiveButton("はい", (dialog, which) -> {
+                .setNegativeButton("はい", (dialog, which) -> {
                     ArrayList<WebView> all;
                     synchronized (webViews) {
                         all = new ArrayList<>(webViews);
@@ -4386,7 +4386,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                     }
                     Toast.makeText(MainActivity.this, message, Toast.LENGTH_SHORT).show();
                 })
-                .setNegativeButton("いいえ", null)
+                .setPositiveButton("いいえ", null)
                 .show();
     }
 
