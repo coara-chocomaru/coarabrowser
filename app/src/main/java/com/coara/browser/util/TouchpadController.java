@@ -28,7 +28,9 @@ public final class TouchpadController {
     private static final long TOUCH_UP_DELAY_MS = 40L;
 
     private static WeakReference<WebView> currentWebView = new WeakReference<>(null);
-    private static boolean active;
+    private static volatile boolean active;
+    private static volatile boolean blockScreenTouch;
+    private static boolean injecting;
     private static float pendingMoveX;
     private static float pendingMoveY;
     private static float pendingStickX;
@@ -65,6 +67,7 @@ public final class TouchpadController {
             return;
         }
         if (current != null) {
+            abandonNativeTouch(current);
             call(current, "stop", null);
         }
         currentWebView = new WeakReference<>(webView);
@@ -79,6 +82,7 @@ public final class TouchpadController {
 
     public static void clearCurrentWebView(WebView webView) {
         if (currentWebView.get() == webView) {
+            abandonNativeTouch(webView);
             call(webView, "stop", null);
             currentWebView = new WeakReference<>(null);
             clearPending();
@@ -135,8 +139,31 @@ public final class TouchpadController {
         if (enabled) {
             installAndStart(webView);
         } else {
+            abandonNativeTouch(webView);
             call(webView, "stop", null);
         }
+    }
+
+    public static void setScreenTouchBlocked(boolean blocked) {
+        blockScreenTouch = blocked;
+    }
+
+    public static boolean isScreenTouchBlocked() {
+        return active && blockScreenTouch;
+    }
+
+    public static boolean shouldDropScreenTouch() {
+        return active && blockScreenTouch && !injecting;
+    }
+
+    private static void abandonNativeTouch(WebView view) {
+        if (nativeTouchDown && view != null) {
+            try {
+                injectTouch(view, MotionEvent.ACTION_CANCEL, 0f, 0f);
+            } catch (Throwable ignored) {
+            }
+        }
+        nativeTouchDown = false;
     }
 
     public static void setStickMode(int mode) {
@@ -465,12 +492,15 @@ public final class TouchpadController {
         }
         MotionEvent event = MotionEvent.obtain(nativeTouchDownTime, now, action, x, y, 0);
         event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        boolean wasInjecting = injecting;
+        injecting = true;
         try {
             view.dispatchTouchEvent(event);
         } finally {
+            injecting = wasInjecting;
             event.recycle();
         }
-        if (action == MotionEvent.ACTION_UP) {
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
             nativeTouchDown = false;
         }
     }
