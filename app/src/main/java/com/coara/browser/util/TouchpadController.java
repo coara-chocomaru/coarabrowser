@@ -1,5 +1,7 @@
 package com.coara.browser.util;
 
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.view.InputDevice;
 import android.view.KeyCharacterMap;
@@ -27,6 +29,18 @@ public final class TouchpadController {
     private static final int KIND_KEY_UP = 6;
     private static final long TOUCH_UP_DELAY_MS = 40L;
 
+    private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
+    private static final Object HOST_MOVE_LOCK = new Object();
+    private static final class PendingMotion {
+        WebView owner;
+        float a;
+        float b;
+        boolean pending;
+    }
+    private static final PendingMotion pendingHover = new PendingMotion();
+    private static final PendingMotion pendingTouchMove = new PendingMotion();
+    private static final MotionEvent.PointerProperties[] HOVER_PROPERTIES = {new MotionEvent.PointerProperties()};
+    private static final MotionEvent.PointerCoords[] HOVER_COORDS = {new MotionEvent.PointerCoords()};
     private static WeakReference<WebView> currentWebView = new WeakReference<>(null);
     private static volatile boolean active;
     private static volatile boolean blockScreenTouch;
@@ -40,16 +54,81 @@ public final class TouchpadController {
     private static float stickY;
     private static int stickMode;
     private static boolean flushScheduled;
+    private static WebView flushWebView;
+    private static boolean hostMoveScheduled;
     private static boolean bridgeInstalled;
     private static long lastInstallTime;
+    private static long lastBridgeCheckTime;
     private static long nativeTouchDownTime;
     private static boolean nativeTouchDown;
     private static String bridgeSource;
+
+    static {
+        HOVER_PROPERTIES[0].id = 0;
+        HOVER_PROPERTIES[0].toolType = MotionEvent.TOOL_TYPE_MOUSE;
+        HOVER_COORDS[0].pressure = 0f;
+        HOVER_COORDS[0].size = 1f;
+    }
+
+    private static final Runnable FLUSH_SCHEDULED_MOVE = new Runnable() {
+        @Override
+        public void run() {
+            WebView target = flushWebView;
+            flushWebView = null;
+            flushScheduled = false;
+            if (target != null) {
+                flush(target);
+            }
+        }
+    };
+
+    private static final Runnable FLUSH_HOST_MOVES = new Runnable() {
+        @Override
+        public void run() {
+            WebView hoverOwner = null;
+            WebView touchOwner = null;
+            float hoverA = 0f;
+            float hoverB = 0f;
+            float touchA = 0f;
+            float touchB = 0f;
+            boolean hasHover;
+            boolean hasTouch;
+            synchronized (HOST_MOVE_LOCK) {
+                hasHover = pendingHover.pending;
+                if (hasHover) {
+                    hoverOwner = pendingHover.owner;
+                    hoverA = pendingHover.a;
+                    hoverB = pendingHover.b;
+                    pendingHover.pending = false;
+                    pendingHover.owner = null;
+                }
+                hasTouch = pendingTouchMove.pending;
+                if (hasTouch) {
+                    touchOwner = pendingTouchMove.owner;
+                    touchA = pendingTouchMove.a;
+                    touchB = pendingTouchMove.b;
+                    pendingTouchMove.pending = false;
+                    pendingTouchMove.owner = null;
+                }
+                hostMoveScheduled = false;
+            }
+            if (hasHover && hoverOwner != null) {
+                dispatchHostRequest(hoverOwner, KIND_HOVER, hoverA, hoverB);
+            }
+            if (hasTouch && touchOwner != null) {
+                dispatchHostRequest(touchOwner, KIND_TOUCH_MOVE, touchA, touchB);
+            }
+        }
+    };
 
     private TouchpadController() {
     }
 
     private static void clearPending() {
+        if (flushScheduled && flushWebView != null) {
+            flushWebView.removeCallbacks(FLUSH_SCHEDULED_MOVE);
+        }
+        flushWebView = null;
         pendingMoveX = 0f;
         pendingMoveY = 0f;
         pendingStickX = 0f;
@@ -277,14 +356,15 @@ public final class TouchpadController {
     }
 
     private static void scheduleFlush(WebView webView) {
-        if (flushScheduled) {
+        if (flushScheduled && flushWebView == webView) {
             return;
         }
+        if (flushScheduled && flushWebView != null) {
+            flushWebView.removeCallbacks(FLUSH_SCHEDULED_MOVE);
+        }
         flushScheduled = true;
-        webView.postOnAnimation(() -> {
-            flushScheduled = false;
-            flush(webView);
-        });
+        flushWebView = webView;
+        webView.postOnAnimation(FLUSH_SCHEDULED_MOVE);
     }
 
     private static void flush(WebView webView) {
@@ -351,6 +431,7 @@ public final class TouchpadController {
             webView.evaluateJavascript(script, null);
             bridgeInstalled = true;
             lastInstallTime = SystemClock.uptimeMillis();
+            lastBridgeCheckTime = 0L;
         } catch (Throwable ignored) {
             bridgeInstalled = false;
         }
@@ -384,15 +465,21 @@ public final class TouchpadController {
             js.append(args);
         }
         js.append(CALL_TAIL);
-        final boolean verify = !"stop".equals(method);
-        ValueCallback<String> callback = verify ? new ValueCallback<String>() {
-            @Override
-            public void onReceiveValue(String value) {
-                if (!"1".equals(value)) {
-                    onBridgeMissing(webView);
+        long now = SystemClock.uptimeMillis();
+        boolean verify = !"stop".equals(method)
+                && (lastBridgeCheckTime == 0L || now - lastBridgeCheckTime >= REINSTALL_INTERVAL_MS);
+        ValueCallback<String> callback = null;
+        if (verify) {
+            lastBridgeCheckTime = now;
+            callback = new ValueCallback<String>() {
+                @Override
+                public void onReceiveValue(String value) {
+                    if (!"1".equals(value)) {
+                        onBridgeMissing(webView);
+                    }
                 }
-            }
-        } : null;
+            };
+        }
         try {
             webView.evaluateJavascript(js.toString(), callback);
         } catch (Throwable ignored) {
@@ -408,9 +495,43 @@ public final class TouchpadController {
             return;
         }
         bridgeInstalled = false;
+        lastBridgeCheckTime = 0L;
         installAndStart(webView);
         if (nativeTouchDown) {
             nativeTouchDown = false;
+        }
+    }
+
+    public static void postHostRequest(final WebView owner, final int kind, final float a, final float b) {
+        if (!active || owner == null || !isFinite(a) || !isFinite(b)) {
+            return;
+        }
+        if (kind == KIND_HOVER || kind == KIND_TOUCH_MOVE) {
+            synchronized (HOST_MOVE_LOCK) {
+                PendingMotion pending = kind == KIND_HOVER ? pendingHover : pendingTouchMove;
+                pending.owner = owner;
+                pending.a = a;
+                pending.b = b;
+                pending.pending = true;
+                if (!hostMoveScheduled) {
+                    hostMoveScheduled = true;
+                    MAIN_HANDLER.post(FLUSH_HOST_MOVES);
+                }
+            }
+            return;
+        }
+        MAIN_HANDLER.post(new Runnable() {
+            @Override
+            public void run() {
+                dispatchHostRequest(owner, kind, a, b);
+            }
+        });
+    }
+
+    private static void dispatchHostRequest(WebView owner, int kind, float a, float b) {
+        try {
+            onHostRequest(owner, kind, a, b);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -463,18 +584,11 @@ public final class TouchpadController {
 
     private static void injectHover(WebView view, float x, float y) {
         long now = SystemClock.uptimeMillis();
-        MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[1];
-        props[0] = new MotionEvent.PointerProperties();
-        props[0].id = 0;
-        props[0].toolType = MotionEvent.TOOL_TYPE_MOUSE;
-        MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[1];
-        coords[0] = new MotionEvent.PointerCoords();
-        coords[0].x = x;
-        coords[0].y = y;
-        coords[0].pressure = 0f;
-        coords[0].size = 1f;
-        MotionEvent event = MotionEvent.obtain(now, now, MotionEvent.ACTION_HOVER_MOVE, 1, props, coords,
-                0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_MOUSE, 0);
+        MotionEvent.PointerCoords coords = HOVER_COORDS[0];
+        coords.x = x;
+        coords.y = y;
+        MotionEvent event = MotionEvent.obtain(now, now, MotionEvent.ACTION_HOVER_MOVE, 1,
+                HOVER_PROPERTIES, HOVER_COORDS, 0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_MOUSE, 0);
         try {
             view.dispatchGenericMotionEvent(event);
         } finally {

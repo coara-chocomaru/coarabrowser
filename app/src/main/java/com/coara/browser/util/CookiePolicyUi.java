@@ -440,7 +440,7 @@ public final class CookiePolicyUi {
         final LinearLayout root = column(a);
         root.addView(grabber(a));
         final BottomSheetDialog dialog = sheet(a, root);
-        root.addView(headerRow(a, "Cookieのブロックと許可", "サイトが保存するCookieの扱いを選びます"));
+        root.addView(headerRow(a, "Cookieのブロックと許可", "Cookieの扱いを選びます"));
         String[] titles = {
                 "サードパーティCookieをブロック(推奨)",
                 "サードパーティCookieを許可",
