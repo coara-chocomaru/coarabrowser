@@ -1651,7 +1651,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
     }
 
     private boolean cookiePromptShowing;
-    private final Map<WebView, Set<String>> cookiePrompted = new WeakHashMap<>();
+    private static final Set<String> COOKIE_PROMPTED_SITES = Collections.synchronizedSet(new java.util.LinkedHashSet<>());
 
     private void onCookieGateRequest(WebView view, String frameOrigin, String message, JavaScriptReplyProxy reply) {
         final boolean storageAccess = message.startsWith(CookieGate.KIND_STORAGE_ACCESS);
@@ -1691,46 +1691,57 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 }
                 return;
             }
-            Set<String> prompted = cookiePrompted.get(view);
-            if (prompted == null) {
-                prompted = new java.util.HashSet<>();
-                cookiePrompted.put(view, prompted);
-            }
-            final String key = frameSite;
-            if (prompted.contains(key) || cookiePromptShowing || view != getCurrentWebView()
-                    || isFinishing() || isDestroyed() || urlEditMode) {
+            final String promptKey = topHost;
+            if (COOKIE_PROMPTED_SITES.contains(promptKey) || cookiePromptShowing
+                    || view != getCurrentWebView() || isFinishing() || isDestroyed() || urlEditMode) {
                 if (storageAccess) {
                     CookieGate.reply(reply, message, false);
                 }
                 return;
             }
-            prompted.add(key);
+            if (COOKIE_PROMPTED_SITES.size() >= 2048) {
+                COOKIE_PROMPTED_SITES.clear();
+            }
+            COOKIE_PROMPTED_SITES.add(promptKey);
             cookiePromptShowing = true;
-            final String text = (storageAccess ? frameHost + " がCookieへのアクセスを求めています。" : frameHost + " がCookieを保存しようとしましたが、現在ブロックされています。")
+            final String text = frameHost + (storageAccess
+                    ? " がCookieへのアクセスを求めています。"
+                    : " がCookieを保存しようとしましたが、現在ブロックされています。")
                     + "\n\n表示中のサイト: " + topHost
-                    + "\n\n許可すると、このサイト(" + topHost + ")ではサードパーティCookieが有効になります(WebViewの仕様上、埋め込み元ごとの個別許可はできません)。許可後はページを再読み込みします。";
+                    + "\n\n許可すると、このサイト(" + topHost + ")ではサードパーティCookieが有効になります。"
+                    + "WebViewの仕様上、埋め込み元ごとの個別許可ではなく、表示中のサイト単位で適用されます。"
+                    + "\n\nこの表示サイトの確認は、このアプリの起動中は繰り返しません。";
             new AlertDialog.Builder(this)
                     .setTitle("サードパーティCookieの要求")
                     .setMessage(text)
                     .setCancelable(true)
-                    .setPositiveButton("許可して再読み込み", (d, w) -> {
+                    .setPositiveButton("このサイトで許可", (d, w) -> {
                         if (CookieSitePolicy.setOverride(pref, topUrl, 1)) {
-                            applyThirdPartyCookiesFor(view, topUrl);
-                            cookiePolicyStamp = computeCookiePolicyStamp();
+                            refreshThirdPartyCookiePolicy();
                             if (storageAccess) {
                                 CookieGate.reply(reply, message, true);
                             }
-                            if (view == getCurrentWebView()) {
+                            if (view == getCurrentWebView()
+                                    && topSite.equals(CookieGate.siteOf(CookieSitePolicy.hostOf(view.getUrl())))) {
                                 view.reload();
                             }
-                        } else if (storageAccess) {
-                            CookieGate.reply(reply, message, false);
+                        } else {
+                            Toast.makeText(MainActivity.this, "Cookie設定を保存できませんでした", Toast.LENGTH_SHORT).show();
+                            if (storageAccess) {
+                                CookieGate.reply(reply, message, false);
+                            }
                         }
                     })
-                    .setNeutralButton("このサイトでは常に拒否", (d, w) -> {
-                        CookieSitePolicy.setOverride(pref, topUrl, -1);
-                        cookiePolicyStamp = computeCookiePolicyStamp();
-                        applyThirdPartyCookiesFor(view, topUrl);
+                    .setNeutralButton("このサイトでは常にブロック", (d, w) -> {
+                        if (CookieSitePolicy.setOverride(pref, topUrl, -1)) {
+                            refreshThirdPartyCookiePolicy();
+                            if (view == getCurrentWebView()
+                                    && topSite.equals(CookieGate.siteOf(CookieSitePolicy.hostOf(view.getUrl())))) {
+                                view.reload();
+                            }
+                        } else {
+                            Toast.makeText(MainActivity.this, "Cookie設定を保存できませんでした", Toast.LENGTH_SHORT).show();
+                        }
                         if (storageAccess) {
                             CookieGate.reply(reply, message, false);
                         }
@@ -1745,7 +1756,9 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                             CookieGate.reply(reply, message, false);
                         }
                     })
-                    .setOnDismissListener(d -> cookiePromptShowing = false)
+                    .setOnDismissListener(d -> {
+                        cookiePromptShowing = false;
+                    })
                     .show();
         } catch (Exception e) {
             cookiePromptShowing = false;
@@ -1784,8 +1797,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                         dialog.dismiss();
                         return;
                     }
-                    applyThirdPartyCookiesFor(current, url);
-                    cookiePolicyStamp = computeCookiePolicyStamp();
+                    refreshThirdPartyCookiePolicy();
                     dialog.dismiss();
                     if (pending == null) {
                         current.reload();
@@ -2126,7 +2138,6 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 loadedPages.remove(view);
-                cookiePrompted.remove(view);
                 PageTranslator.onPageStarted(view);
                 SafeBrowsingSupport.recordNavigation(view, url);
                 ExternalDownloadTabTracker.onPageStarted(view, url);
@@ -4285,11 +4296,18 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 .setTitle("クッキーを消去")
                 .setMessage("一時クッキーを全て消しますか？")
                 .setPositiveButton("はい", (dialog, which) -> {
-                    CookieManager cookieManager = CookieManager.getInstance();
-                    cookieManager.removeAllCookies(removed -> {
-                        cookieManager.flush();
-                        runOnUiThread(() -> Toast.makeText(MainActivity.this, "クッキーを消去しました", Toast.LENGTH_SHORT).show());
-                    });
+                    try {
+                        CookieManager cookieManager = CookieManager.getInstance();
+                        cookieManager.removeAllCookies(removed -> {
+                            cookieManager.flush();
+                            String message = Boolean.TRUE.equals(removed)
+                                    ? "クッキーを消去しました"
+                                    : "消去対象のクッキーはありませんでした";
+                            Toast.makeText(MainActivity.this, message, Toast.LENGTH_SHORT).show();
+                        });
+                    } catch (Exception e) {
+                        Toast.makeText(MainActivity.this, "クッキーを消去できませんでした", Toast.LENGTH_SHORT).show();
+                    }
                 })
                 .setNegativeButton("いいえ", null)
                 .show();
@@ -4304,13 +4322,23 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                     synchronized (webViews) {
                         all = new ArrayList<>(webViews);
                     }
+                    boolean cleared = false;
                     for (WebView webView : all) {
+                        if (webView == null) {
+                            continue;
+                        }
                         try {
                             webView.clearCache(true);
+                            cleared = true;
+                            break;
                         } catch (Exception ignored) {
                         }
                     }
-                    Toast.makeText(MainActivity.this, "キャッシュを消去しました", Toast.LENGTH_SHORT).show();
+                    if (cleared) {
+                        Toast.makeText(MainActivity.this, "キャッシュの消去処理が完了しました", Toast.LENGTH_SHORT).show();
+                    } else {
+                        Toast.makeText(MainActivity.this, "キャッシュを消去するWebViewがありませんでした", Toast.LENGTH_SHORT).show();
+                    }
                 })
                 .setNegativeButton("いいえ", null)
                 .show();
@@ -4325,17 +4353,38 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                     synchronized (webViews) {
                         all = new ArrayList<>(webViews);
                     }
+                    WebViewDatabase database = null;
+                    Boolean hadFormData = null;
+                    try {
+                        database = WebViewDatabase.getInstance(MainActivity.this);
+                        hadFormData = database.hasFormData();
+                    } catch (Exception ignored) {
+                    }
                     for (WebView webView : all) {
+                        if (webView == null) {
+                            continue;
+                        }
                         try {
                             webView.clearFormData();
                         } catch (Exception ignored) {
                         }
                     }
                     try {
-                        WebViewDatabase.getInstance(MainActivity.this).clearFormData();
+                        if (database == null) {
+                            database = WebViewDatabase.getInstance(MainActivity.this);
+                        }
+                        database.clearFormData();
                     } catch (Exception ignored) {
                     }
-                    Toast.makeText(MainActivity.this, "フォーム履歴を消去しました", Toast.LENGTH_SHORT).show();
+                    String message;
+                    if (hadFormData == null) {
+                        message = "フォーム履歴の消去処理を実行しました";
+                    } else if (hadFormData) {
+                        message = "フォーム履歴を消去しました";
+                    } else {
+                        message = "消去対象のフォーム履歴はありませんでした";
+                    }
+                    Toast.makeText(MainActivity.this, message, Toast.LENGTH_SHORT).show();
                 })
                 .setNegativeButton("いいえ", null)
                 .show();
