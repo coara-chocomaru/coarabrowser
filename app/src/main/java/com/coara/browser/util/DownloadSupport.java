@@ -525,7 +525,7 @@ public final class DownloadSupport {
         }
         String cookie = null;
         try {
-            cookie = CookieManager.getInstance().getCookie(url);
+            cookie = CookieSitePolicy.cookieFor(url);
         } catch (Exception ignored) {
         }
         addHeaderIfSafe(request, "Cookie", cookie);

@@ -40,6 +40,7 @@ import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 import com.coara.browser.model.DownloadItem;
 import com.coara.browser.util.BasicAuthManager;
+import com.coara.browser.util.CookieSitePolicy;
 import com.coara.browser.util.BrowserConstants;
 import com.coara.browser.util.DayLabeler;
 import com.coara.browser.util.DownloadFallbackManager;
@@ -839,7 +840,7 @@ public class DownloadHistoryActivity extends AppCompatActivity {
                 request.setDescription(item.description != null ? item.description : "Downloading file...");
                 DownloadSupport.addHeaderIfSafe(request, "User-Agent", item.userAgent);
                 DownloadSupport.addHeaderIfSafe(request, "Referer", item.referer);
-                DownloadSupport.addHeaderIfSafe(request, "Cookie", CookieManager.getInstance().getCookie(item.downloadUrl));
+                DownloadSupport.addHeaderIfSafe(request, "Cookie", CookieSitePolicy.cookieFor(item.downloadUrl));
                 DownloadSupport.addHeaderIfSafe(request, "Authorization", BasicAuthManager.getAuthorizationHeaderForUrl(item.downloadUrl, item.basicAuthEnabled));
                 request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE);
                 request.setAllowedOverMetered(true);

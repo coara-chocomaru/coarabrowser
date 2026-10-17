@@ -14,6 +14,8 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import com.coara.browser.util.BrowserConstants;
+import com.coara.browser.util.CookiePolicyUi;
+import com.coara.browser.util.CookieSitePolicy;
 import com.coara.browser.util.DeviceInfoProvider;
 import com.coara.browser.util.TextFileReader;
 import com.coara.browser.util.WebViewEngineInfo;
@@ -40,7 +42,7 @@ public class SettingsActivity extends AppCompatActivity {
         List<SettingItem> settingsList = new ArrayList<>();
         settingsList.add(new SettingItem("アプリ情報", "アプリの情報", this::openAppInfo));
         settingsList.add(new SettingItem("端末情報", "デバイスの基本情報を表示", this::showDeviceInfo));
-        settingsList.add(new SettingItem("サードパーティCookie", thirdPartyCookieSummary(), this::showThirdPartyCookieDialog));
+        settingsList.add(new SettingItem("Cookieのブロックと許可", cookieSummary(), this::showCookieDialog));
         settingsList.add(new SettingItem("Chromium / WebView エンジン", "現在のエンジンバージョンと対応機能", this::showWebViewEngine));
         settingsList.add(new SettingItem("アプリバージョン", getAppVersion(), null));
         settingsList.add(new SettingItem("ライセンス", "ライセンス情報を表示", this::showLicense));
@@ -53,23 +55,27 @@ public class SettingsActivity extends AppCompatActivity {
         return getSharedPreferences(BrowserConstants.PREF_NAME, Context.MODE_PRIVATE);
     }
 
-    private String thirdPartyCookieSummary() {
-        return browserPrefs().getBoolean(BrowserConstants.KEY_THIRD_PARTY_COOKIES, false)
-                ? "許可中(互換性優先・追跡されやすくなります)"
-                : "ブロック中(推奨・一部サイトのログインや埋め込みが動かない場合は許可に変更)";
+    private String cookieSummary() {
+        SharedPreferences prefs = browserPrefs();
+        int mode = CookieSitePolicy.mode(prefs);
+        int allowed = CookieSitePolicy.sites(prefs, true).size();
+        int blocked = CookieSitePolicy.sites(prefs, false).size();
+        String base;
+        if (mode == CookieSitePolicy.MODE_BLOCK_ALL) {
+            base = "クッキーを常にブロック&拒否中(すべてのCookieを保存・送信しません)";
+        } else if (mode == CookieSitePolicy.MODE_ALLOW_THIRD_PARTY) {
+            base = "サードパーティCookieを許可中(互換性優先・追跡されやすくなります)";
+        } else {
+            base = "サードパーティCookieをブロック中(推奨)";
+        }
+        if (mode != CookieSitePolicy.MODE_BLOCK_ALL && (allowed > 0 || blocked > 0)) {
+            base += "\nサイト別: 許可 " + allowed + " / ブロック " + blocked;
+        }
+        return base;
     }
 
-    private void showThirdPartyCookieDialog() {
-        final boolean allowed = browserPrefs().getBoolean(BrowserConstants.KEY_THIRD_PARTY_COOKIES, false);
-        new AlertDialog.Builder(this)
-                .setTitle("サードパーティCookie")
-                .setSingleChoiceItems(new CharSequence[] {"ブロック(推奨)", "許可(互換性優先)"}, allowed ? 1 : 0, (dialog, which) -> {
-                    browserPrefs().edit().putBoolean(BrowserConstants.KEY_THIRD_PARTY_COOKIES, which == 1).apply();
-                    dialog.dismiss();
-                    recreate();
-                })
-                .setNegativeButton("閉じる", null)
-                .show();
+    private void showCookieDialog() {
+        CookiePolicyUi.showGlobalDialog(this, browserPrefs(), this::recreate);
     }
 
     private String getAppVersion() {

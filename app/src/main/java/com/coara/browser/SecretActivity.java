@@ -82,6 +82,7 @@ import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.textfield.TextInputEditText;
 import com.coara.browser.util.BasicAuthManager;
+import com.coara.browser.util.CookieSitePolicy;
 import com.coara.browser.util.ExternalDownloadTabTracker;
 import com.coara.browser.util.DownloadSupport;
 import com.coara.browser.util.DownloadFallbackManager;
@@ -1584,7 +1585,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         DownloadManager.Request request =
             new DownloadManager.Request(Uri.parse(imageUrl));
         request.setMimeType("image/*");
-        String cookies = CookieManager.getInstance().getCookie(imageUrl);
+        String cookies = CookieSitePolicy.cookieFor(imageUrl);
         if (cookies != null && !cookies.isEmpty()) {
             request.addRequestHeader("Cookie", cookies);
         }

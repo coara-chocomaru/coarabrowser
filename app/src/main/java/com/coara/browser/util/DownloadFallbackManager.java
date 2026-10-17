@@ -472,7 +472,7 @@ public final class DownloadFallbackManager {
                 }
                 String cookie = null;
                 try {
-                    cookie = CookieManager.getInstance().getCookie(currentUrl);
+                    cookie = CookieSitePolicy.cookieFor(currentUrl);
                 } catch (Exception ignored) {
                 }
                 DownloadSupport.addHeader(connection, "Cookie", cookie);

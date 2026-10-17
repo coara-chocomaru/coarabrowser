@@ -61,7 +61,7 @@ public final class DownloadRequestSupport {
 
         String cookies = null;
         try {
-            cookies = CookieManager.getInstance().getCookie(url);
+            cookies = CookieSitePolicy.cookieFor(url);
         } catch (Exception ignored) {
         }
         if (cookies != null && !cookies.trim().isEmpty()) {

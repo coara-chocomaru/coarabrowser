@@ -25,6 +25,7 @@ public class BrowserApplication extends Application {
     public void onCreate() {
         super.onCreate();
         installCrashLogger();
+        com.coara.browser.util.CookieSitePolicy.init(this);
         initializePlugins();
         Thread channels = new Thread(this::createDownloadNotificationChannel, "coara-channels");
         channels.setDaemon(true);

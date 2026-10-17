@@ -2,6 +2,7 @@ package com.coara.browser.plugin;
 
 import android.util.Base64;
 import android.webkit.CookieManager;
+import com.coara.browser.util.CookieSitePolicy;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -292,7 +293,7 @@ final class PluginHttp {
                         c.setRequestProperty("User-Agent", opts.optString("ua", "Mozilla/5.0 (Linux; Android 10) CoaraBrowser"));
                     }
                     if (!anonymous && !hasCookie) {
-                        String cookie = CookieManager.getInstance().getCookie(current);
+                        String cookie = CookieSitePolicy.cookieFor(current);
                         if (cookie != null && !cookie.isEmpty()) {
                             c.setRequestProperty("Cookie", cookie);
                         }

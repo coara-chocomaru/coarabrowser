@@ -111,6 +111,7 @@ import com.coara.browser.util.SwipeRefreshPolicy;
 import com.coara.browser.util.SpaStateManager;
 import com.coara.browser.util.CacheModePolicy;
 import com.coara.browser.util.BrowserConstants;
+import com.coara.browser.util.CookiePolicyUi;
 import com.coara.browser.util.CookieSitePolicy;
 import com.coara.browser.util.BasicAuthManager;
 import com.coara.browser.util.ExternalDownloadTabTracker;
@@ -1614,28 +1615,36 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
             return;
         }
         try {
-            CookieManager.getInstance().setAcceptThirdPartyCookies(webView, CookieSitePolicy.isAllowed(pref, url));
+            CookieManager cookieManager = CookieManager.getInstance();
+            boolean allow = CookieSitePolicy.isAllowed(pref, url);
+            if (cookieManager.acceptThirdPartyCookies(webView) != allow) {
+                cookieManager.setAcceptThirdPartyCookies(webView, allow);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void applyGlobalCookieAccept() {
+        try {
+            boolean accept = !CookieSitePolicy.blockAll(pref);
+            CookieManager cookieManager = CookieManager.getInstance();
+            if (cookieManager.acceptCookie() != accept) {
+                cookieManager.setAcceptCookie(accept);
+            }
         } catch (Exception ignored) {
         }
     }
 
     private void applyCookiePolicy(WebView webView) {
-        CookieManager cookieManager = CookieManager.getInstance();
-        cookieManager.setAcceptCookie(true);
+        applyGlobalCookieAccept();
         applyThirdPartyCookiesFor(webView, webView.getUrl());
     }
 
     private int cookiePolicyStamp = Integer.MIN_VALUE;
 
-    private int computeCookiePolicyStamp() {
-        return java.util.Objects.hash(
-                CookieSitePolicy.globalAllowed(pref),
-                pref.getStringSet(CookieSitePolicy.KEY_ALLOW_SITES, null),
-                pref.getStringSet(CookieSitePolicy.KEY_BLOCK_SITES, null));
-    }
-
     private void refreshThirdPartyCookiePolicy() {
-        int stamp = computeCookiePolicyStamp();
+        applyGlobalCookieAccept();
+        int stamp = CookieSitePolicy.revision();
         if (stamp == cookiePolicyStamp) {
             return;
         }
@@ -1651,120 +1660,107 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
     }
 
     private boolean cookiePromptShowing;
-    private static final Set<String> COOKIE_PROMPTED_SITES = Collections.synchronizedSet(new java.util.LinkedHashSet<>());
+    private static final java.util.Map<String, Boolean> COOKIE_PROMPTED_SITES = Collections.synchronizedMap(
+            new java.util.LinkedHashMap<String, Boolean>(32, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(java.util.Map.Entry<String, Boolean> eldest) {
+                    return size() > 256;
+                }
+            });
 
-    private void onCookieGateRequest(WebView view, String frameOrigin, String message, JavaScriptReplyProxy reply) {
+    private static void replyStorageAccess(JavaScriptReplyProxy reply, String message, boolean storageAccess, boolean allow) {
+        if (storageAccess) {
+            CookieGate.reply(reply, message, allow);
+        }
+    }
+
+    private void onCookieGateRequest(final WebView view, String frameOrigin, final String message, final JavaScriptReplyProxy reply) {
         final boolean storageAccess = message.startsWith(CookieGate.KIND_STORAGE_ACCESS);
         try {
+            if (CookieSitePolicy.blockAll(pref)) {
+                replyStorageAccess(reply, message, storageAccess, false);
+                return;
+            }
             final String topUrl = view.getUrl();
             if (!BrowserUrlRouter.isWebUrl(topUrl)) {
-                if (storageAccess) {
-                    CookieGate.reply(reply, message, false);
-                }
+                replyStorageAccess(reply, message, storageAccess, false);
                 return;
             }
             final String topHost = CookieSitePolicy.hostOf(topUrl);
             final String frameHost = CookieSitePolicy.hostOf(frameOrigin);
             if (topHost.isEmpty() || frameHost.isEmpty()) {
-                if (storageAccess) {
-                    CookieGate.reply(reply, message, false);
-                }
+                replyStorageAccess(reply, message, storageAccess, false);
                 return;
             }
             final String topSite = CookieGate.siteOf(topHost);
-            final String frameSite = CookieGate.siteOf(frameHost);
-            if (topSite.equals(frameSite)) {
-                if (storageAccess) {
-                    CookieGate.reply(reply, message, true);
-                }
+            if (topSite.equals(CookieGate.siteOf(frameHost))) {
+                replyStorageAccess(reply, message, storageAccess, true);
                 return;
             }
             if (CookieSitePolicy.isAllowed(pref, topUrl)) {
-                if (storageAccess) {
-                    CookieGate.reply(reply, message, true);
-                }
+                replyStorageAccess(reply, message, storageAccess, true);
                 return;
             }
             if (CookieSitePolicy.override(pref, topUrl) < 0) {
-                if (storageAccess) {
-                    CookieGate.reply(reply, message, false);
-                }
+                replyStorageAccess(reply, message, storageAccess, false);
                 return;
             }
-            final String promptKey = topHost;
-            if (COOKIE_PROMPTED_SITES.contains(promptKey) || cookiePromptShowing
+            if (COOKIE_PROMPTED_SITES.containsKey(topSite) || cookiePromptShowing
                     || view != getCurrentWebView() || isFinishing() || isDestroyed() || urlEditMode) {
-                if (storageAccess) {
-                    CookieGate.reply(reply, message, false);
-                }
+                replyStorageAccess(reply, message, storageAccess, false);
                 return;
             }
-            if (COOKIE_PROMPTED_SITES.size() >= 2048) {
-                COOKIE_PROMPTED_SITES.clear();
-            }
-            COOKIE_PROMPTED_SITES.add(promptKey);
+            COOKIE_PROMPTED_SITES.put(topSite, Boolean.TRUE);
             cookiePromptShowing = true;
-            final String text = (storageAccess
-                    ? "表示中のサイト「" + topHost + "」に埋め込まれたコンテンツが、Cookieへのアクセスを要求しています。"
-                    : "表示中のサイト「" + topHost + "」で、サードパーティCookieの保存要求を検知しました。")
-                    + "\n\n設定対象のサイト: " + topHost
-                    + "\n\n許可すると、このサイトではサードパーティCookieが有効になります。"
-                    + "WebViewの仕様上、埋め込み元ごとの個別許可ではなく、表示中のサイト単位で適用されます。"
-                    + "\n\nこの表示サイトの確認は、このアプリの起動中は繰り返しません。";
-            new AlertDialog.Builder(this)
-                    .setTitle("サードパーティCookie: " + topHost)
-                    .setMessage(text)
-                    .setCancelable(true)
-                    .setPositiveButton("このサイトで許可", (d, w) -> {
-                        if (CookieSitePolicy.setOverride(pref, topUrl, 1)) {
-                            refreshThirdPartyCookiePolicy();
-                            if (storageAccess) {
-                                CookieGate.reply(reply, message, true);
-                            }
-                            if (view == getCurrentWebView()
-                                    && topSite.equals(CookieGate.siteOf(CookieSitePolicy.hostOf(view.getUrl())))) {
-                                view.reload();
-                            }
-                        } else {
-                            Toast.makeText(MainActivity.this, "Cookie設定を保存できませんでした", Toast.LENGTH_SHORT).show();
-                            if (storageAccess) {
-                                CookieGate.reply(reply, message, false);
+            boolean shown = CookiePolicyUi.showPrompt(this, topHost, frameHost, storageAccess,
+                    new CookiePolicyUi.PromptListener() {
+                        @Override
+                        public void onAllow() {
+                            if (CookieSitePolicy.setOverride(pref, topUrl, 1)) {
+                                refreshThirdPartyCookiePolicy();
+                                replyStorageAccess(reply, message, storageAccess, true);
+                                reloadIfSameSite(view, topSite);
+                            } else {
+                                Toast.makeText(MainActivity.this, "Cookie設定を保存できませんでした", Toast.LENGTH_SHORT).show();
+                                replyStorageAccess(reply, message, storageAccess, false);
                             }
                         }
-                    })
-                    .setNeutralButton("このサイトでは常にブロック", (d, w) -> {
-                        if (CookieSitePolicy.setOverride(pref, topUrl, -1)) {
-                            refreshThirdPartyCookiePolicy();
-                            if (view == getCurrentWebView()
-                                    && topSite.equals(CookieGate.siteOf(CookieSitePolicy.hostOf(view.getUrl())))) {
-                                view.reload();
+
+                        @Override
+                        public void onBlockAlways() {
+                            if (CookieSitePolicy.setOverride(pref, topUrl, -1)) {
+                                refreshThirdPartyCookiePolicy();
+                                reloadIfSameSite(view, topSite);
+                            } else {
+                                Toast.makeText(MainActivity.this, "Cookie設定を保存できませんでした", Toast.LENGTH_SHORT).show();
                             }
-                        } else {
-                            Toast.makeText(MainActivity.this, "Cookie設定を保存できませんでした", Toast.LENGTH_SHORT).show();
+                            replyStorageAccess(reply, message, storageAccess, false);
                         }
-                        if (storageAccess) {
-                            CookieGate.reply(reply, message, false);
+
+                        @Override
+                        public void onDeny() {
+                            replyStorageAccess(reply, message, storageAccess, false);
                         }
-                    })
-                    .setNegativeButton("今回は拒否", (d, w) -> {
-                        if (storageAccess) {
-                            CookieGate.reply(reply, message, false);
+
+                        @Override
+                        public void onClosed() {
+                            cookiePromptShowing = false;
                         }
-                    })
-                    .setOnCancelListener(d -> {
-                        if (storageAccess) {
-                            CookieGate.reply(reply, message, false);
-                        }
-                    })
-                    .setOnDismissListener(d -> {
-                        cookiePromptShowing = false;
-                    })
-                    .show();
+                    });
+            if (!shown) {
+                cookiePromptShowing = false;
+                replyStorageAccess(reply, message, storageAccess, false);
+            }
         } catch (Exception e) {
             cookiePromptShowing = false;
-            if (storageAccess) {
-                CookieGate.reply(reply, message, false);
-            }
+            replyStorageAccess(reply, message, storageAccess, false);
+        }
+    }
+
+    private void reloadIfSameSite(WebView view, String topSite) {
+        if (view == getCurrentWebView()
+                && topSite.equals(CookieGate.siteOf(CookieSitePolicy.hostOf(view.getUrl())))) {
+            view.reload();
         }
     }
 
@@ -1775,37 +1771,16 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         }
         final PendingTab pending = pendingTabs.get(current);
         final String url = pending != null ? pending.url : current.getUrl();
-        final String host = CookieSitePolicy.hostOf(url);
-        if (host.isEmpty() || !BrowserUrlRouter.isWebUrl(url)) {
+        if (CookieSitePolicy.hostOf(url).isEmpty() || !BrowserUrlRouter.isWebUrl(url)) {
             Toast.makeText(this, "このページでは設定できません", Toast.LENGTH_SHORT).show();
             return;
         }
-        final boolean globalAllowed = CookieSitePolicy.globalAllowed(pref);
-        final int mode = CookieSitePolicy.override(pref, url);
-        final String[] labels = new String[] {
-                "このサイトで許可",
-                "このサイトでブロック",
-                "既定に従う(現在の既定: " + (globalAllowed ? "許可" : "ブロック") + ")"
-        };
-        int checked = mode > 0 ? 0 : (mode < 0 ? 1 : 2);
-        new AlertDialog.Builder(this)
-                .setTitle("サードパーティCookie: " + host)
-                .setSingleChoiceItems(labels, checked, (dialog, which) -> {
-                    int newMode = which == 0 ? 1 : (which == 1 ? -1 : 0);
-                    if (!CookieSitePolicy.setOverride(pref, url, newMode)) {
-                        Toast.makeText(MainActivity.this, "保存できませんでした", Toast.LENGTH_SHORT).show();
-                        dialog.dismiss();
-                        return;
-                    }
-                    refreshThirdPartyCookiePolicy();
-                    dialog.dismiss();
-                    if (pending == null) {
-                        current.reload();
-                    }
-                    Toast.makeText(MainActivity.this, "設定を反映しました", Toast.LENGTH_SHORT).show();
-                })
-                .setNegativeButton("閉じる", null)
-                .show();
+        CookiePolicyUi.showSiteDialog(this, pref, url, () -> {
+            refreshThirdPartyCookiePolicy();
+            if (pending == null) {
+                current.reload();
+            }
+        });
     }
 
     private WebView createNewWebView() {
@@ -2170,6 +2145,9 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
             }
             @Override
             public void onPageFinished(WebView view, String url) {
+                if (url == null) {
+                    url = "";
+                }
                 loadedPages.add(view);
                 ExternalDownloadTabTracker.onPageFinished(view, url);
                 if (findController != null) {
@@ -3430,7 +3408,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
             }
             DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
             DownloadManager.Request request = new DownloadManager.Request(Uri.parse(imageUrl));
-            String cookies = CookieManager.getInstance().getCookie(imageUrl);
+            String cookies = CookieSitePolicy.cookieFor(imageUrl);
             if (!isBlank(cookies)) {
                 request.addRequestHeader("Cookie", cookies);
             }
@@ -5457,7 +5435,7 @@ private void addHistory(String url, String title) {
 
     private void saveCookiesForTab(final int id, final String url) {
         try {
-            if (id == -1 || url == null) return;
+            if (id == -1 || url == null || CookieSitePolicy.isBlockAllActive()) return;
             final CookieManager cm = CookieManager.getInstance();
             final String cookie = cm.getCookie(url);
             if (cookie == null) return;
@@ -5478,7 +5456,7 @@ private void addHistory(String url, String title) {
 
     private void restoreCookiesForTab(final int id, final String url) {
         try {
-            if (id == -1 || url == null) return;
+            if (id == -1 || url == null || CookieSitePolicy.isBlockAllActive()) return;
             File in = new File(getFilesDir(), "tab_cookies_" + id + ".txt");
             if (!in.exists()) return;
             String cookie = null;
