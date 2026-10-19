@@ -8,7 +8,7 @@ android {
     defaultConfig {
         minSdk = 24
         targetSdk = 31
-        versionCode = 332
+        versionCode = 336
         versionName = "4.4.4-3"
         multiDexEnabled = true
         if (project.hasProperty('bundleBuild')) {
