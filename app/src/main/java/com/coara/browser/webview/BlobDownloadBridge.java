@@ -128,13 +128,26 @@ public class BlobDownloadBridge {
                 totalSize = Long.parseLong(totalSizeStr);
             } catch (Exception ignored) {
             }
-            String effectiveMime = DownloadSupport.normalizeMimeType(mimeType, null);
-            String effectiveName = DownloadSupport.resolveFileName(
-                    "https://blob.invalid/" + (DownloadSupport.isBlank(fileName) ? "download" : fileName),
-                    contentDisposition, effectiveMime);
-            if (DownloadSupport.isBlank(effectiveName) || "download".equalsIgnoreCase(effectiveName)) {
-                effectiveName = DownloadSupport.isBlank(fileName) ? DownloadSupport.buildTimestampFileName("blob_download_", effectiveMime) : fileName;
+            String boundedFileName = fileName;
+            if (boundedFileName != null && boundedFileName.length() > 512) {
+                boundedFileName = boundedFileName.substring(0, 512);
             }
+            String boundedMimeType = mimeType;
+            if (boundedMimeType != null && boundedMimeType.length() > 256) {
+                boundedMimeType = boundedMimeType.substring(0, 256);
+            }
+            String boundedDisposition = contentDisposition;
+            if (boundedDisposition != null && boundedDisposition.length() > 4096) {
+                boundedDisposition = boundedDisposition.substring(0, 4096);
+            }
+            String effectiveMime = DownloadSupport.normalizeMimeType(boundedMimeType, null);
+            String effectiveName = DownloadSupport.resolveFileName(
+                    "https://blob.invalid/" + (DownloadSupport.isBlank(boundedFileName) ? "download" : boundedFileName),
+                    boundedDisposition, effectiveMime);
+            if (DownloadSupport.isBlank(effectiveName) || "download".equalsIgnoreCase(effectiveName)) {
+                effectiveName = DownloadSupport.isBlank(boundedFileName) ? DownloadSupport.buildTimestampFileName("blob_download_", effectiveMime) : boundedFileName;
+            }
+            effectiveName = DownloadSupport.sanitizeFileName(effectiveName);
             effectiveName = DownloadSupport.resolveUniqueDownloadFileName(context, effectiveName);
             if (totalSize > MAX_BLOB_BYTES) {
                 throw new java.io.IOException("too large");
