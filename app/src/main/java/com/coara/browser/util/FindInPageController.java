@@ -18,6 +18,7 @@ import android.view.inputmethod.InputMethodManager;
 import android.webkit.WebView;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import com.coara.browser.R;
@@ -54,13 +55,16 @@ public final class FindInPageController {
     private final WebView.FindListener listener = new WebView.FindListener() {
         @Override
         public void onFindResultReceived(int activeMatchOrdinal, int numberOfMatches, boolean isDoneCounting) {
+            if (!isShowing() || active == null || active != provider.current()) {
+                return;
+            }
             total = numberOfMatches;
             if (count == null) {
                 return;
             }
             if (numberOfMatches > 0) {
                 count.setTextColor(defaultCountColor);
-                count.setText((activeMatchOrdinal + 1) + "/" + numberOfMatches);
+                count.setText((Math.max(activeMatchOrdinal, 0) + 1) + "/" + numberOfMatches);
             } else if (isDoneCounting) {
                 count.setTextColor(lastQuery.isEmpty() ? defaultCountColor : Color.parseColor("#D93025"));
                 count.setText("0/0");
@@ -198,9 +202,27 @@ public final class FindInPageController {
             suppressWatcher = false;
             hide();
         });
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP);
-        activity.addContentView(bar, params);
+        View toolbar = activity.findViewById(R.id.topAppBar);
+        if (toolbar != null && toolbar.getParent() instanceof ViewGroup) {
+            ViewGroup parent = (ViewGroup) toolbar.getParent();
+            int index = parent.indexOfChild(toolbar);
+            ViewGroup.LayoutParams params;
+            if (parent instanceof LinearLayout) {
+                params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            } else {
+                params = new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            }
+            parent.addView(bar, index >= 0 ? index + 1 : parent.getChildCount(), params);
+        } else {
+            FrameLayout content = activity.findViewById(android.R.id.content);
+            if (content != null) {
+                FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP);
+                content.addView(bar, params);
+            }
+        }
     }
 
     private void scheduleSearch(long delay) {
@@ -220,7 +242,7 @@ public final class FindInPageController {
 
     private void step(boolean forward) {
         WebView w = provider.current();
-        if (w == null || total <= 0) {
+        if (w == null || w != active || total <= 0) {
             return;
         }
         try {
@@ -235,6 +257,9 @@ public final class FindInPageController {
             return;
         }
         String q = input.getText().toString().trim();
+        if (active == w && q.equals(lastQuery)) {
+            return;
+        }
         if (active != null && active != w) {
             try {
                 active.clearMatches();
@@ -243,8 +268,8 @@ public final class FindInPageController {
             }
         }
         active = w;
-        lastQuery = q;
         if (q.isEmpty()) {
+            lastQuery = "";
             try {
                 w.clearMatches();
             } catch (Exception ignored) {
@@ -252,8 +277,17 @@ public final class FindInPageController {
             resetCount();
             return;
         }
-        w.setFindListener(listener);
-        w.findAllAsync(q);
+        lastQuery = q;
+        try {
+            w.setFindListener(listener);
+            w.findAllAsync(q);
+        } catch (Exception ignored) {
+            total = 0;
+            if (count != null) {
+                count.setTextColor(defaultCountColor);
+                count.setText("0/0");
+            }
+        }
     }
 
     private void clearActive() {
