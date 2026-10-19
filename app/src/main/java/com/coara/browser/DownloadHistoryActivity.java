@@ -793,7 +793,7 @@ public class DownloadHistoryActivity extends AppCompatActivity {
     private void deleteFileAndRecord(DownloadItem item) {
         invalidatePendingLoads();
         if (DownloadSupport.deleteLocalUri(this, item.localUri)
-                || (!DownloadSupport.isBlank(item.filePath) && new File(item.filePath).delete())) {
+                || DownloadSupport.deleteLocalUri(this, item.filePath)) {
             Toast.makeText(this, "ファイルを削除しました", Toast.LENGTH_SHORT).show();
         } else {
             Toast.makeText(this, "ファイルの削除に失敗しました", Toast.LENGTH_SHORT).show();

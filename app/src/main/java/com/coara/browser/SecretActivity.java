@@ -1598,7 +1598,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         if (refererUrl != null && !refererUrl.isEmpty() && BrowserUrlRouter.isWebUrl(refererUrl)) {
             request.addRequestHeader("Referer", refererUrl);
         }
-        String fileName = URLUtil.guessFileName(imageUrl, null, "image/*");
+        String fileName = DownloadSupport.sanitizeFileName(URLUtil.guessFileName(imageUrl, null, "image/*"));
         request.setTitle(fileName);
         request.setDescription("画像を保存中...");
         request.setNotificationVisibility(

@@ -5610,7 +5610,7 @@ private void addHistory(String url, String title) {
         }
         fileName = sanitizeFileName(fileName);
         fileName = ensureExtensionForFileName(fileName, mimeType, url);
-        return fileName;
+        return sanitizeFileName(fileName);
     }
 
 
