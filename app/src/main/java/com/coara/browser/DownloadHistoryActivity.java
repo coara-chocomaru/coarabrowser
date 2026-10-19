@@ -123,6 +123,11 @@ public class DownloadHistoryActivity extends AppCompatActivity {
                         String path = pathById.get(e.getKey());
                         u.fileExists = itemExists(path, u.localUri);
                     }
+                    if (!u.manual && (u.status == DownloadManager.STATUS_SUCCESSFUL
+                            || u.status == DownloadManager.STATUS_FAILED)) {
+                        DownloadHistoryManager.saveDownloadManagerStatus(DownloadHistoryActivity.this, u.downloadId, u.status,
+                                u.downloadedSize, u.totalSize, u.localUri);
+                    }
                 }
                 updateHandler.post(() -> {
                     if (pollGeneration.get() != myGeneration || isFinishing() || isDestroyed()) {
@@ -353,7 +358,20 @@ public class DownloadHistoryActivity extends AppCompatActivity {
                 String filePath = obj.optString("filePath", "");
                 String storedLocalUri = obj.optString("localUri", "");
                 boolean manualRecord = obj.has("manualStatus") || obj.optBoolean("pausedByUser", false);
+                int savedDownloadStatus = obj.optInt("downloadStatus", -1);
                 DownloadItem item = fromManager.get(downloadId);
+                boolean preserveSuccessfulStatus = item != null && !manualRecord
+                        && savedDownloadStatus == DownloadManager.STATUS_SUCCESSFUL
+                        && item.status != DownloadManager.STATUS_SUCCESSFUL;
+                if (preserveSuccessfulStatus) {
+                    item.status = DownloadManager.STATUS_SUCCESSFUL;
+                    item.downloadedSize = Math.max(item.downloadedSize, obj.optLong("downloadedSize", 0L));
+                    item.totalSize = Math.max(item.totalSize, obj.optLong("totalSize", 0L));
+                } else if (item != null && !manualRecord && (item.status == DownloadManager.STATUS_SUCCESSFUL
+                        || item.status == DownloadManager.STATUS_FAILED)) {
+                    DownloadHistoryManager.saveDownloadManagerStatus(this, downloadId, item.status,
+                            item.downloadedSize, item.totalSize, item.localUri);
+                }
                 if (item == null && manualRecord) {
                     item = DownloadHistoryManager.getManualDownloadItem(this, downloadId);
                 }
@@ -373,9 +391,34 @@ public class DownloadHistoryActivity extends AppCompatActivity {
                         item.isPaused = obj.optBoolean("manualPaused", false) || obj.optBoolean("pausedByUser", false);
                     } else {
                         boolean exists = itemExists(filePath, localUri);
-                        long size = getItemSize(filePath, localUri);
-                        int status = exists ? DownloadManager.STATUS_SUCCESSFUL : DownloadManager.STATUS_FAILED;
-                        item = new DownloadItem(downloadId, fileName, "", status, 0, size, localUri, "");
+                        int savedStatus = obj.optInt("downloadStatus", -1);
+                        long downloadedSize = obj.optLong("downloadedSize", 0L);
+                        long totalSize = obj.optLong("totalSize", 0L);
+                        int status;
+                        boolean statusUnknown = false;
+                        boolean inferredSuccessful = false;
+                        if (savedStatus == DownloadManager.STATUS_SUCCESSFUL || savedStatus == DownloadManager.STATUS_FAILED) {
+                            status = savedStatus;
+                        } else if (exists) {
+                            status = DownloadManager.STATUS_SUCCESSFUL;
+                            inferredSuccessful = true;
+                        } else {
+                            status = DownloadManager.STATUS_FAILED;
+                            statusUnknown = true;
+                        }
+                        if (totalSize <= 0L) {
+                            totalSize = getItemSize(filePath, localUri);
+                        }
+                        if (inferredSuccessful) {
+                            if (downloadedSize <= 0L) {
+                                downloadedSize = totalSize;
+                            }
+                            DownloadHistoryManager.saveDownloadManagerStatus(this, downloadId,
+                                    DownloadManager.STATUS_SUCCESSFUL, downloadedSize, totalSize, localUri);
+                        }
+                        item = new DownloadItem(downloadId, fileName, "", status, downloadedSize,
+                                totalSize, localUri, obj.optString("downloadUrl", ""));
+                        item.statusUnknown = statusUnknown;
                     }
                 } else {
                     if (item.title == null || item.title.isEmpty() || "Unknown".equalsIgnoreCase(item.title)) {
@@ -706,55 +749,21 @@ public class DownloadHistoryActivity extends AppCompatActivity {
         }
     }
 
+    private void invalidatePendingLoads() {
+        loadGeneration.incrementAndGet();
+    }
+
     private void removeHistoryRecord(long downloadId) {
-        try {
-            String jsonStr = pref.getString(BrowserConstants.KEY_DOWNLOAD_HISTORY, "[]");
-            JSONArray array = new JSONArray(jsonStr);
-            JSONArray updated = new JSONArray();
-            for (int i = 0; i < array.length(); i++) {
-                JSONObject obj = array.getJSONObject(i);
-                if (obj.optLong("id", -1L) != downloadId) {
-                    updated.put(obj);
-                }
-            }
-            pref.edit().putString(BrowserConstants.KEY_DOWNLOAD_HISTORY, updated.toString()).apply();
-        } catch (JSONException e) {
-            e.printStackTrace();
-        }
+        DownloadHistoryManager.removeDownloadHistory(this, downloadId);
     }
 
     private void replaceHistoryRecord(long oldId, long newId, String title, String path) {
-        try {
-            String jsonStr = pref.getString(BrowserConstants.KEY_DOWNLOAD_HISTORY, "[]");
-            JSONArray array = new JSONArray(jsonStr);
-            JSONArray updated = new JSONArray();
-            for (int i = 0; i < array.length(); i++) {
-                JSONObject obj = array.getJSONObject(i);
-                if (obj.optLong("id", -1L) == oldId) {
-                    JSONObject next = new JSONObject(obj.toString());
-                    next.put("id", newId);
-                    next.put("fileName", title != null ? title : "");
-                    next.put("filePath", path != null ? path : "");
-                    next.remove("localUri");
-                    next.remove("manualStatus");
-                    next.remove("manualDownloaded");
-                    next.remove("manualTotal");
-                    next.remove("manualUpdatedAt");
-                    next.remove("manualPaused");
-                    next.remove("pausedByUser");
-                    updated.put(next);
-                } else {
-                    updated.put(obj);
-                }
-            }
-            pref.edit().putString(BrowserConstants.KEY_DOWNLOAD_HISTORY, updated.toString()).apply();
-        } catch (JSONException e) {
-            e.printStackTrace();
-        }
+        DownloadHistoryManager.replaceDownloadHistoryRecord(this, oldId, newId, title, path);
     }
 
     public void clearDownloadHistory() {
-        pref.edit().remove(BrowserConstants.KEY_DOWNLOAD_HISTORY).apply();
+        invalidatePendingLoads();
+        DownloadHistoryManager.clearDownloadHistory(this);
         if (adapter != null) adapter.clearAll();
         updateEmptyState();
         Toast.makeText(this, "ダウンロード履歴を全消去しました", Toast.LENGTH_SHORT).show();
@@ -775,12 +784,14 @@ public class DownloadHistoryActivity extends AppCompatActivity {
     }
 
     private void removeFromHistory(DownloadItem item) {
+        invalidatePendingLoads();
         adapter.removeItem(item);
         removeHistoryRecord(item.downloadId);
         Toast.makeText(this, "履歴から消去しました", Toast.LENGTH_SHORT).show();
     }
 
     private void deleteFileAndRecord(DownloadItem item) {
+        invalidatePendingLoads();
         if (DownloadSupport.deleteLocalUri(this, item.localUri)
                 || (!DownloadSupport.isBlank(item.filePath) && new File(item.filePath).delete())) {
             Toast.makeText(this, "ファイルを削除しました", Toast.LENGTH_SHORT).show();
@@ -792,6 +803,7 @@ public class DownloadHistoryActivity extends AppCompatActivity {
     }
 
     private void cancelItem(DownloadItem item) {
+        invalidatePendingLoads();
         if (item.manual) {
             DownloadFallbackManager.cancelDownload(this, item.downloadId);
         } else {
@@ -1106,8 +1118,10 @@ public class DownloadHistoryActivity extends AppCompatActivity {
                             : joinParts(formatSize(item.totalSize), item.host);
                     break;
                 case DownloadManager.STATUS_FAILED:
-                    statusText = joinParts("ダウンロードに失敗しました", item.host);
-                    statusColor = COLOR_RED;
+                    statusText = item.statusUnknown
+                            ? "ダウンロード状態を確認できません"
+                            : joinParts("ダウンロードに失敗しました", item.host);
+                    statusColor = item.statusUnknown ? COLOR_GRAY : COLOR_RED;
                     break;
                 case DownloadManager.STATUS_RUNNING:
                     statusText = "ダウンロード中 · " + progressText;

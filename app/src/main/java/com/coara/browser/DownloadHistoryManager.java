@@ -84,6 +84,128 @@ public class DownloadHistoryManager {
         }
     }
 
+    public static void saveDownloadManagerStatus(Context context, long downloadId, int status,
+                                                 long downloadedSize, long totalSize, String localUri) {
+        if (context == null || downloadId <= 0L
+                || (status != DownloadManager.STATUS_SUCCESSFUL && status != DownloadManager.STATUS_FAILED)) {
+            return;
+        }
+        SharedPreferences pref = context.getSharedPreferences(BrowserConstants.PREF_NAME, Context.MODE_PRIVATE);
+        synchronized (HISTORY_LOCK) {
+            try {
+                JSONArray array = new JSONArray(pref.getString(BrowserConstants.KEY_DOWNLOAD_HISTORY, "[]"));
+                for (int i = 0; i < array.length(); i++) {
+                    JSONObject obj = array.getJSONObject(i);
+                    if (obj.optLong("id", -1L) != downloadId || obj.has("manualStatus")) {
+                        continue;
+                    }
+                    boolean changed = obj.optInt("downloadStatus", -1) != status;
+                    if (changed) {
+                        obj.put("downloadStatus", status);
+                    }
+                    if (downloadedSize >= 0L && obj.optLong("downloadedSize", -1L) != downloadedSize) {
+                        obj.put("downloadedSize", downloadedSize);
+                        changed = true;
+                    }
+                    if (totalSize >= 0L && obj.optLong("totalSize", -1L) != totalSize) {
+                        obj.put("totalSize", totalSize);
+                        changed = true;
+                    }
+                    if (!DownloadSupport.isBlank(localUri)
+                            && !localUri.equals(obj.optString("localUri", ""))) {
+                        obj.put("localUri", localUri);
+                        changed = true;
+                    }
+                    if (changed) {
+                        obj.put("downloadStatusUpdatedAt", System.currentTimeMillis());
+                        pref.edit().putString(BrowserConstants.KEY_DOWNLOAD_HISTORY, array.toString()).commit();
+                    }
+                    return;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    public static void removeDownloadHistory(Context context, long downloadId) {
+        if (context == null || downloadId <= 0L) {
+            return;
+        }
+        SharedPreferences pref = context.getSharedPreferences(BrowserConstants.PREF_NAME, Context.MODE_PRIVATE);
+        synchronized (HISTORY_LOCK) {
+            try {
+                JSONArray array = new JSONArray(pref.getString(BrowserConstants.KEY_DOWNLOAD_HISTORY, "[]"));
+                JSONArray updated = new JSONArray();
+                boolean changed = false;
+                for (int i = 0; i < array.length(); i++) {
+                    JSONObject obj = array.getJSONObject(i);
+                    if (obj.optLong("id", -1L) == downloadId) {
+                        changed = true;
+                    } else {
+                        updated.put(obj);
+                    }
+                }
+                if (changed) {
+                    pref.edit().putString(BrowserConstants.KEY_DOWNLOAD_HISTORY, updated.toString()).commit();
+                }
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    public static void clearDownloadHistory(Context context) {
+        if (context == null) {
+            return;
+        }
+        SharedPreferences pref = context.getSharedPreferences(BrowserConstants.PREF_NAME, Context.MODE_PRIVATE);
+        synchronized (HISTORY_LOCK) {
+            pref.edit().remove(BrowserConstants.KEY_DOWNLOAD_HISTORY).commit();
+        }
+    }
+
+    public static void replaceDownloadHistoryRecord(Context context, long oldId, long newId,
+                                                    String title, String path) {
+        if (context == null || oldId <= 0L || newId <= 0L) {
+            return;
+        }
+        SharedPreferences pref = context.getSharedPreferences(BrowserConstants.PREF_NAME, Context.MODE_PRIVATE);
+        synchronized (HISTORY_LOCK) {
+            try {
+                JSONArray array = new JSONArray(pref.getString(BrowserConstants.KEY_DOWNLOAD_HISTORY, "[]"));
+                JSONArray updated = new JSONArray();
+                boolean changed = false;
+                for (int i = 0; i < array.length(); i++) {
+                    JSONObject obj = array.getJSONObject(i);
+                    if (obj.optLong("id", -1L) == oldId) {
+                        JSONObject next = new JSONObject(obj.toString());
+                        next.put("id", newId);
+                        next.put("fileName", title == null ? "" : title);
+                        next.put("filePath", path == null ? "" : path);
+                        next.remove("localUri");
+                        next.remove("manualStatus");
+                        next.remove("manualDownloaded");
+                        next.remove("manualTotal");
+                        next.remove("manualUpdatedAt");
+                        next.remove("manualPaused");
+                        next.remove("pausedByUser");
+                        next.remove("downloadStatus");
+                        next.remove("downloadStatusUpdatedAt");
+                        next.remove("downloadedSize");
+                        next.remove("totalSize");
+                        updated.put(next);
+                        changed = true;
+                    } else {
+                        updated.put(obj);
+                    }
+                }
+                if (changed) {
+                    pref.edit().putString(BrowserConstants.KEY_DOWNLOAD_HISTORY, updated.toString()).commit();
+                }
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
     private static final AtomicLong MANUAL_DOWNLOAD_ID =
             new AtomicLong(Math.max(1L, System.currentTimeMillis() * 1000L));
 
@@ -375,6 +497,8 @@ public class DownloadHistoryManager {
                             DownloadFallbackManager.onSuspiciousSuccessfulDownload(context, dm, downloadId, localUri);
                             break;
                         }
+                        saveDownloadManagerStatus(context, downloadId, status, bytesDownloaded,
+                                safeGetLong(cursor, DownloadManager.COLUMN_TOTAL_SIZE_BYTES), localUri);
                         DownloadFallbackManager.clear(downloadId);
                         DownloadFallbackManager.postCompleteNotification(context, downloadId, title);
                         break;
@@ -384,6 +508,9 @@ public class DownloadHistoryManager {
                         if (DownloadFallbackManager.shouldFallback(reason)) {
                             DownloadFallbackManager.onDownloadManagerFailure(context, dm, downloadId, reason);
                         } else {
+                            saveDownloadManagerStatus(context, downloadId, status, bytesDownloaded,
+                                    safeGetLong(cursor, DownloadManager.COLUMN_TOTAL_SIZE_BYTES),
+                                    safeGetString(cursor, DownloadManager.COLUMN_LOCAL_URI));
                             DownloadFallbackManager.clear(downloadId);
                             postToast(context, describeFailureReason(reason));
                         }
