@@ -149,8 +149,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.lang.reflect.Method;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.net.URLEncoder;
 import java.net.URLDecoder;
 import java.security.MessageDigest;
@@ -4561,44 +4559,68 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
         Handler handler = UiThread.mainHandler();
-        PixelCopy.request(getWindow(), bitmap, copyResult -> {
-            if (copyResult == PixelCopy.SUCCESS) {
-                saveScreenshot(bitmap);
-            } else {
-                Toast.makeText(MainActivity.this, "スクリーンショットの取得に失敗しました", Toast.LENGTH_SHORT).show();
-            }
-        }, handler);
+        try {
+            PixelCopy.request(getWindow(), bitmap, copyResult -> {
+                if (copyResult == PixelCopy.SUCCESS) {
+                    saveScreenshot(bitmap);
+                } else {
+                    recycleScreenshotBitmap(bitmap);
+                    Toast.makeText(MainActivity.this, "スクリーンショットの取得に失敗しました", Toast.LENGTH_SHORT).show();
+                }
+            }, handler);
+        } catch (RuntimeException e) {
+            recycleScreenshotBitmap(bitmap);
+            Toast.makeText(MainActivity.this, "スクリーンショットの取得に失敗しました", Toast.LENGTH_SHORT).show();
+        }
     } else {
         Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(bitmap);
-        rootView.draw(canvas);
-        saveScreenshot(bitmap);
+        try {
+            Canvas canvas = new Canvas(bitmap);
+            rootView.draw(canvas);
+            saveScreenshot(bitmap);
+        } catch (RuntimeException e) {
+            recycleScreenshotBitmap(bitmap);
+            throw e;
+        }
     }
 }
 
 private void saveScreenshot(Bitmap bitmap) {
-    backgroundExecutor.execute(() -> {
-        try {
-            File screenshotDir = new File(Environment.getExternalStorageDirectory(), "DCIM/Screenshot");
-            if (!screenshotDir.exists()) {
-                screenshotDir.mkdirs();
+    try {
+        backgroundExecutor.execute(() -> {
+            try {
+                File screenshotDir = new File(Environment.getExternalStorageDirectory(), "DCIM/Screenshot");
+                if (!screenshotDir.exists()) {
+                    screenshotDir.mkdirs();
+                }
+                String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
+                String fileName = timeStamp + ".png";
+                File screenshotFile = new File(screenshotDir, fileName);
+                try (FileOutputStream fos = new FileOutputStream(screenshotFile)) {
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 80, fos);
+                    fos.flush();
+                }
+                runOnUiThread(() ->
+                    Toast.makeText(MainActivity.this, "スクリーンショットを保存しました: " + screenshotFile.getAbsolutePath(), Toast.LENGTH_LONG).show()
+                );
+            } catch (Exception e) {
+                runOnUiThread(() ->
+                    Toast.makeText(MainActivity.this, "スクリーンショット保存中にエラー: " + e.getMessage(), Toast.LENGTH_LONG).show()
+                );
+            } finally {
+                recycleScreenshotBitmap(bitmap);
             }
-            String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
-            String fileName = timeStamp + ".png";
-            File screenshotFile = new File(screenshotDir, fileName);
-            try (FileOutputStream fos = new FileOutputStream(screenshotFile)) {
-                bitmap.compress(Bitmap.CompressFormat.PNG, 80, fos); 
-                fos.flush();
-            }
-            runOnUiThread(() ->
-                Toast.makeText(MainActivity.this, "スクリーンショットを保存しました: " + screenshotFile.getAbsolutePath(), Toast.LENGTH_LONG).show()
-            );
-        } catch (Exception e) {
-            runOnUiThread(() ->
-                Toast.makeText(MainActivity.this, "スクリーンショット保存中にエラー: " + e.getMessage(), Toast.LENGTH_LONG).show()
-            );
-        }
-    });
+        });
+    } catch (RuntimeException e) {
+        recycleScreenshotBitmap(bitmap);
+        Toast.makeText(MainActivity.this, "スクリーンショット保存中にエラー: " + e.getMessage(), Toast.LENGTH_LONG).show();
+    }
+}
+
+private void recycleScreenshotBitmap(Bitmap bitmap) {
+    if (bitmap != null && !bitmap.isRecycled()) {
+        bitmap.recycle();
+    }
 }
 
     @SuppressWarnings("deprecation")
@@ -5354,30 +5376,7 @@ private void addHistory(String url, String title) {
     }
 
     private Bitmap fetchFavicon(String bookmarkUrl) {
-        HttpURLConnection connection = null;
-        try {
-            URL urlObj = new URL(bookmarkUrl);
-            String protocol = urlObj.getProtocol();
-            String host = urlObj.getHost();
-            String faviconUrl = protocol + "://" + host + "/favicon.ico";
-            connection = (HttpURLConnection) new URL(faviconUrl).openConnection();
-            connection.setConnectTimeout(3000);
-            connection.setReadTimeout(3000);
-            connection.setRequestMethod("GET");
-            connection.connect();
-            if (connection.getResponseCode() == HttpURLConnection.HTTP_OK) {
-                try (InputStream is = connection.getInputStream()) {
-                    return BitmapFactory.decodeStream(is);
-                }
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        } finally {
-            if (connection != null) {
-                connection.disconnect();
-            }
-        }
-        return null;
+        return com.coara.browser.util.FaviconLoader.fetch(bookmarkUrl);
     }
 
     private String getFaviconFilename(String url) {

@@ -123,8 +123,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.lang.reflect.Method;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.net.URLEncoder;
 import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
@@ -2761,25 +2759,7 @@ private void addHistory(String url, String title) {
     }
 
     private Bitmap fetchFavicon(String bookmarkUrl) {
-        try {
-            URL urlObj = new URL(bookmarkUrl);
-            String protocol = urlObj.getProtocol();
-            String host = urlObj.getHost();
-            String faviconUrl = protocol + "://" + host + "/favicon.ico";
-            HttpURLConnection connection = (HttpURLConnection) new URL(faviconUrl).openConnection();
-            connection.setConnectTimeout(3000);
-            connection.setReadTimeout(3000);
-            connection.setRequestMethod("GET");
-            connection.connect();
-            if (connection.getResponseCode() == HttpURLConnection.HTTP_OK) {
-                try (InputStream is = connection.getInputStream()) {
-                    return BitmapFactory.decodeStream(is);
-                }
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-        return null;
+        return com.coara.browser.util.FaviconLoader.fetch(bookmarkUrl);
     }
 
 
