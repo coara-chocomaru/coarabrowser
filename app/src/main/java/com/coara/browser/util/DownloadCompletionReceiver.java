@@ -6,6 +6,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
 
+import com.coara.browser.DownloadHistoryManager;
+
 public class DownloadCompletionReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -40,6 +42,12 @@ public class DownloadCompletionReceiver extends BroadcastReceiver {
             if (DownloadSupport.isSuspiciousDownloadedFile(context, localUri, title, mimeType)) {
                 return;
             }
+            int totalIndex = cursor.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES);
+            int downloadedIndex = cursor.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR);
+            long totalSize = totalIndex >= 0 ? cursor.getLong(totalIndex) : -1L;
+            long downloadedSize = downloadedIndex >= 0 ? cursor.getLong(downloadedIndex) : -1L;
+            DownloadHistoryManager.saveDownloadManagerStatus(context, downloadId, DownloadManager.STATUS_SUCCESSFUL,
+                    downloadedSize, totalSize, localUri);
             DownloadFallbackManager.postCompleteNotification(context, downloadId, title);
         } catch (Exception ignored) {
         }
