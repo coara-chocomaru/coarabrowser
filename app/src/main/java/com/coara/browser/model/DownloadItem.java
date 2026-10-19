@@ -18,6 +18,7 @@ public class DownloadItem {
     public String mimeType;
     public long timestamp;
     public boolean fileExists;
+    public boolean statusUnknown;
     public String host = "";
 
     public DownloadItem(long downloadId, String title, String description, int status, long downloadedSize, long totalSize, String localUri, String downloadUrl) {
@@ -36,6 +37,7 @@ public class DownloadItem {
         this.userAgent = "";
         this.referer = "";
         this.basicAuthEnabled = false;
+        this.statusUnknown = false;
     }
 
     public int getProgress() {
