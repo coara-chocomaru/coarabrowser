@@ -735,15 +735,71 @@ public final class DownloadSupport {
         }
         try {
             Uri uri = Uri.parse(localUri);
-            if ("content".equalsIgnoreCase(uri.getScheme())) {
+            String scheme = uri.getScheme();
+            if ("content".equalsIgnoreCase(scheme)) {
+                if (!isDownloadContentUri(uri)) {
+                    return false;
+                }
                 return context.getContentResolver().delete(uri, null, null) > 0;
             }
-            if ("file".equalsIgnoreCase(uri.getScheme())) {
-                String path = uri.getPath();
-                return !isBlank(path) && new java.io.File(path).delete();
+            if ("file".equalsIgnoreCase(scheme)) {
+                return deleteDownloadFile(uri.getPath());
             }
-            java.io.File file = new java.io.File(localUri);
-            return file.delete();
+            if (!isBlank(scheme)) {
+                return false;
+            }
+            return deleteDownloadFile(localUri);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isDownloadContentUri(Uri uri) {
+        if (uri == null || !"content".equalsIgnoreCase(uri.getScheme())) {
+            return false;
+        }
+        String authority = uri.getAuthority();
+        String path = uri.getPath();
+        if (isBlank(authority) || isBlank(path)) {
+            return false;
+        }
+        if ("downloads".equalsIgnoreCase(authority)) {
+            return path.matches("/(?:my_downloads|all_downloads|public_downloads)/[0-9]+/?");
+        }
+        if ("media".equalsIgnoreCase(authority)) {
+            return path.matches("/(?:external|external_primary|external_sd)/(?:downloads/[0-9]+|images/media/[0-9]+)/?");
+        }
+        return false;
+    }
+
+    private static boolean deleteDownloadFile(String path) {
+        if (isBlank(path)) {
+            return false;
+        }
+        try {
+            java.io.File candidate = new java.io.File(path).getAbsoluteFile();
+            java.io.File parent = candidate.getParentFile();
+            if (parent == null) {
+                return false;
+            }
+            java.io.File canonicalParent = parent.getCanonicalFile();
+            java.io.File canonicalFile = candidate.getCanonicalFile();
+            if (canonicalFile.getParentFile() == null || !canonicalParent.equals(canonicalFile.getParentFile())
+                    || !candidate.getName().equals(canonicalFile.getName()) || !canonicalFile.isFile()) {
+                return false;
+            }
+            java.io.File[] allowedDirs = new java.io.File[]{
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getCanonicalFile(),
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES).getCanonicalFile()
+            };
+            boolean allowed = false;
+            for (java.io.File allowedDir : allowedDirs) {
+                if (canonicalParent.equals(allowedDir)) {
+                    allowed = true;
+                    break;
+                }
+            }
+            return allowed && canonicalFile.delete();
         } catch (Exception ignored) {
             return false;
         }

@@ -83,10 +83,30 @@ public final class DownloadRequestSupport {
         request.setAllowedOverMetered(true);
         request.setAllowedOverRoaming(true);
         request.setDestinationInExternalPublicDir(
-                destinationDirectory == null || destinationDirectory.isEmpty()
-                        ? Environment.DIRECTORY_DOWNLOADS : destinationDirectory,
+                safeDestinationDirectory(destinationDirectory),
                 fileName);
         return request;
+    }
+
+    private static String safeDestinationDirectory(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return Environment.DIRECTORY_DOWNLOADS;
+        }
+        String directory = value.trim();
+        if (Environment.DIRECTORY_ALARMS.equals(directory)
+                || Environment.DIRECTORY_DCIM.equals(directory)
+                || Environment.DIRECTORY_DOCUMENTS.equals(directory)
+                || Environment.DIRECTORY_DOWNLOADS.equals(directory)
+                || Environment.DIRECTORY_MOVIES.equals(directory)
+                || Environment.DIRECTORY_MUSIC.equals(directory)
+                || Environment.DIRECTORY_NOTIFICATIONS.equals(directory)
+                || Environment.DIRECTORY_PICTURES.equals(directory)
+                || Environment.DIRECTORY_PODCASTS.equals(directory)
+                || Environment.DIRECTORY_RINGTONES.equals(directory)
+                || "Audiobooks".equals(directory)) {
+            return directory;
+        }
+        return Environment.DIRECTORY_DOWNLOADS;
     }
 
     public static String getAccurateFileName(String url, String contentDisposition, String mimeType) {
@@ -98,7 +118,7 @@ public final class DownloadRequestSupport {
             fileName = "download_" + System.currentTimeMillis();
         }
         fileName = sanitizeFileName(fileName);
-        return ensureExtension(fileName, mimeType, url);
+        return sanitizeFileName(ensureExtension(fileName, mimeType, url));
     }
 
     public static String normalizeMimeType(String mimeType, String sourceUrl) {

@@ -49,9 +49,10 @@ public final class PublicStorageWriter {
     }
 
     private static Target open(Context context, String fileName, String mimeType, String publicDir, Uri collection) throws IOException {
+        String safeFileName = normalizeFileName(fileName);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && collection != null) {
             ContentValues values = new ContentValues();
-            values.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, safeFileName);
             if (mimeType != null && !mimeType.isEmpty()) {
                 values.put(MediaStore.MediaColumns.MIME_TYPE, mimeType);
             }
@@ -66,7 +67,7 @@ public final class PublicStorageWriter {
                     context.getContentResolver().delete(uri, null, null);
                     throw new IOException("openOutputStream failed");
                 }
-                return new Target(out, uri, null, publicDir + "/" + fileName, uri.toString());
+                return new Target(out, uri, null, publicDir + "/" + safeFileName, uri.toString());
             } catch (Exception e) {
                 try {
                     context.getContentResolver().delete(uri, null, null);
@@ -82,9 +83,44 @@ public final class PublicStorageWriter {
         if (!dir.exists() && !dir.mkdirs() && !dir.exists()) {
             throw new IOException("mkdir failed");
         }
-        File file = new File(dir, fileName);
+        File canonicalDir = dir.getCanonicalFile();
+        if (!canonicalDir.isDirectory()) {
+            throw new IOException("invalid output directory");
+        }
+        File candidate = new File(canonicalDir, safeFileName);
+        File file = candidate.getCanonicalFile();
+        if (!file.equals(candidate.getAbsoluteFile()) || file.getParentFile() == null
+                || !file.getParentFile().equals(canonicalDir) || file.isDirectory()) {
+            throw new IOException("invalid output path");
+        }
         OutputStream out = new FileOutputStream(file);
         return new Target(out, null, file, file.getAbsolutePath(), Uri.fromFile(file).toString());
+    }
+
+    private static String normalizeFileName(String fileName) throws IOException {
+        String candidate = fileName;
+        if (candidate != null && candidate.length() > 1024) {
+            candidate = candidate.substring(0, 1024);
+        }
+        String safe = DownloadSupport.sanitizeFileName(candidate);
+        if (safe == null || safe.trim().isEmpty()) {
+            safe = "download";
+        }
+        if (safe.length() > 180) {
+            int end = 180;
+            if (end > 0 && Character.isHighSurrogate(safe.charAt(end - 1))) {
+                end--;
+            }
+            safe = safe.substring(0, end);
+        }
+        while (!safe.isEmpty() && (safe.endsWith(".") || safe.endsWith(" "))) {
+            safe = safe.substring(0, safe.length() - 1);
+        }
+        if (safe.isEmpty() || ".".equals(safe) || "..".equals(safe)
+                || safe.indexOf('/') >= 0 || safe.indexOf('\\') >= 0 || new File(safe).isAbsolute()) {
+            throw new IOException("invalid file name");
+        }
+        return safe;
     }
 
     public static boolean finish(Context context, Target target) {
