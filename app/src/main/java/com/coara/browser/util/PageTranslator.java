@@ -26,10 +26,13 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -61,10 +64,22 @@ public final class PageTranslator {
     private static final class Chunk {
         final int base;
         final String[] texts;
+        final String source;
 
-        Chunk(int base, String[] texts) {
+        Chunk(int base, String[] texts, String source) {
             this.base = base;
             this.texts = texts;
+            this.source = source;
+        }
+    }
+
+    private static final class BlockContext {
+        final String text;
+        final String lang;
+
+        BlockContext(String text, String lang) {
+            this.text = text == null ? "" : text;
+            this.lang = lang == null ? "" : lang;
         }
     }
 
@@ -79,7 +94,8 @@ public final class PageTranslator {
         boolean started;
         boolean failed;
         boolean errorShown;
-        boolean mlReady;
+        final boolean automatic;
+        final Set<String> mlReadySources = new HashSet<>();
         boolean mlRunning;
         boolean polling;
         int pending;
@@ -91,7 +107,8 @@ public final class PageTranslator {
             this.online = allowOnline;
             this.silent = silent;
             this.target = target;
-            this.source = TranslateSettings.AUTO.equals(fixedSource) ? null : fixedSource;
+            this.automatic = TranslateSettings.AUTO.equals(fixedSource);
+            this.source = automatic ? null : fixedSource;
         }
     }
 
@@ -237,7 +254,7 @@ public final class PageTranslator {
         JSONArray array = result.optJSONArray("texts");
         int count = array == null ? 0 : array.length();
         if (count == 0) {
-            if (first) {
+            if (first && !session.automatic) {
                 abort(session, "翻訳できるテキストがありません");
             } else {
                 session.pollMs = Math.min(POLL_MAX_MS, session.pollMs + 500L);
@@ -251,19 +268,39 @@ public final class PageTranslator {
             texts[i] = array.optString(i);
         }
         int base = result.optInt("base", 0);
+        JSONArray groupIdsJson = result.optJSONArray("groupIds");
+        int[] groupIds = new int[count];
+        Arrays.fill(groupIds, -1);
+        if (groupIdsJson != null) {
+            for (int i = 0; i < Math.min(count, groupIdsJson.length()); i++) {
+                groupIds[i] = groupIdsJson.optInt(i, -1);
+            }
+        }
+        List<BlockContext> groups = new ArrayList<>();
+        JSONArray groupsJson = result.optJSONArray("groups");
+        if (groupsJson != null) {
+            for (int i = 0; i < groupsJson.length(); i++) {
+                JSONObject group = groupsJson.optJSONObject(i);
+                if (group != null) {
+                    groups.add(new BlockContext(group.optString("text", ""), group.optString("lang", "")));
+                }
+            }
+        }
         String lang = result.optString("lang", "");
-        if (session.source != null && session.source.equals(primary(session.target))) {
+        if (!session.automatic && session.source != null && session.source.equals(primary(session.target))) {
             abort(session, "翻訳元と翻訳先が同じ言語です");
             return;
         }
-        if (session.source == null) {
-            detect(session, texts, lang, result.optString("contentLang", ""), result.optString("sample", ""), base);
+        if (session.automatic && session.source == null) {
+            detect(session, texts, lang, result.optString("contentLang", ""), result.optString("sample", ""), base, groupIds, groups);
+        } else if (session.automatic) {
+            detectBlocks(session, base, texts, groupIds, groups, session.source);
         } else {
             dispatch(session, base, texts);
         }
     }
 
-    private static void detect(Session session, String[] texts, String htmlLang, String contentLang, String sample, int base) {
+    private static void detect(Session session, String[] texts, String htmlLang, String contentLang, String sample, int base, int[] groupIds, List<BlockContext> groups) {
         String detectionText = sample == null ? "" : sample.trim();
         if (detectionText.isEmpty()) {
             StringBuilder fallback = new StringBuilder();
@@ -289,14 +326,14 @@ public final class PageTranslator {
         final String textSample = detectionText;
         try {
             identifier().identifyLanguage(textSample)
-                    .addOnSuccessListener(tag -> onSource(session, tag, htmlLang, contentLang, textSample, base, texts))
-                    .addOnFailureListener(e -> onSource(session, "und", htmlLang, contentLang, textSample, base, texts));
+                    .addOnSuccessListener(tag -> onSource(session, tag, htmlLang, contentLang, textSample, base, texts, groupIds, groups))
+                    .addOnFailureListener(e -> onSource(session, "und", htmlLang, contentLang, textSample, base, texts, groupIds, groups));
         } catch (Throwable t) {
-            onSource(session, "und", htmlLang, contentLang, textSample, base, texts);
+            onSource(session, "und", htmlLang, contentLang, textSample, base, texts, groupIds, groups);
         }
     }
 
-    private static void onSource(Session session, String tag, String htmlLang, String contentLang, String sample, int base, String[] texts) {
+    private static void onSource(Session session, String tag, String htmlLang, String contentLang, String sample, int base, String[] texts, int[] groupIds, List<BlockContext> groups) {
         WebView view = session.view.get();
         if (view == null || !alive(session)) {
             return;
@@ -325,9 +362,8 @@ public final class PageTranslator {
                 source = pageHint;
             } else if (session.online) {
                 source = "auto";
-            } else if (!contentHint.isEmpty() || !pageHint.isEmpty()) {
-                abort(session, "このページの言語を判定できませんでした");
-                return;
+            } else {
+                source = target;
             }
         } else if (source.equals(target) || (!inferred.isEmpty() && inferred.equals(target))) {
             if (!inferred.isEmpty() && inferred.equals(target)) {
@@ -347,19 +383,106 @@ public final class PageTranslator {
             }
         }
         if (source.isEmpty() || "und".equals(source)) {
-            if (session.online) {
-                source = "auto";
-            } else {
-                abort(session, "このページの言語を判定できませんでした");
-                return;
-            }
-        }
-        if (source.equals(target)) {
-            abort(session, "このページは" + TranslateSettings.labelFor(session.target) + "です");
-            return;
+            source = session.online ? "auto" : target;
         }
         session.source = source;
-        dispatch(session, base, texts);
+        detectBlocks(session, base, texts, groupIds, groups, source);
+    }
+
+    private static void detectBlocks(Session session, int base, String[] texts, int[] groupIds, List<BlockContext> groups, String fallbackSource) {
+        if (!alive(session)) {
+            return;
+        }
+        String target = primary(session.target);
+        String fallback = primary(fallbackSource);
+        if (fallback.isEmpty() || "und".equals(fallback)) {
+            fallback = session.online ? "auto" : target;
+        }
+        final String resolvedFallback = fallback;
+        String[] groupSources = new String[groups == null ? 0 : groups.size()];
+        List<Integer> identify = new ArrayList<>();
+        for (int i = 0; i < groupSources.length; i++) {
+            BlockContext group = groups.get(i);
+            String hint = primary(group.lang);
+            if (!hint.isEmpty() && !"und".equals(hint)) {
+                groupSources[i] = hint;
+                continue;
+            }
+            String scriptLanguage = inferScriptLanguage(group.text, target);
+            if (scriptLanguage.equals(target)) {
+                groupSources[i] = target;
+            } else if (!scriptLanguage.isEmpty() && !"en".equals(scriptLanguage) && !("zh".equals(scriptLanguage) && "ja".equals(target))) {
+                groupSources[i] = scriptLanguage;
+            } else if (group.text.trim().length() >= 8 && (fallback.equals(target) || "auto".equals(fallback) || !"en".equals(fallback))) {
+                identify.add(i);
+            } else {
+                groupSources[i] = fallback;
+            }
+        }
+        if (identify.isEmpty()) {
+            dispatchDetectedSources(session, base, texts, groupIds, groupSources, resolvedFallback);
+            return;
+        }
+        int[] remaining = {identify.size()};
+        boolean[] completed = {false};
+        Runnable finishDetection = () -> {
+            if (!completed[0] && remaining[0] == 0 && alive(session)) {
+                completed[0] = true;
+                dispatchDetectedSources(session, base, texts, groupIds, groupSources, resolvedFallback);
+            }
+        };
+        LanguageIdentifier languageIdentifier;
+        try {
+            languageIdentifier = identifier();
+        } catch (Throwable t) {
+            for (Integer index : identify) {
+                groupSources[index] = resolvedFallback;
+                remaining[0]--;
+            }
+            finishDetection.run();
+            return;
+        }
+        for (Integer index : identify) {
+            final int groupIndex = index;
+            String sample = groups.get(groupIndex).text;
+            try {
+                languageIdentifier.identifyLanguage(sample)
+                        .addOnSuccessListener(tag -> {
+                            String language = primary(tag);
+                            if (language.isEmpty() || "und".equals(language)) {
+                                language = inferScriptLanguage(sample, target);
+                            }
+                            if (language.isEmpty() || "und".equals(language)) {
+                                language = resolvedFallback;
+                            }
+                            groupSources[groupIndex] = language;
+                            remaining[0]--;
+                            finishDetection.run();
+                        })
+                        .addOnFailureListener(e -> {
+                            groupSources[groupIndex] = resolvedFallback;
+                            remaining[0]--;
+                            finishDetection.run();
+                        });
+            } catch (Throwable t) {
+                groupSources[groupIndex] = resolvedFallback;
+                remaining[0]--;
+                finishDetection.run();
+            }
+        }
+    }
+
+    private static void dispatchDetectedSources(Session session, int base, String[] texts, int[] groupIds, String[] groupSources, String fallback) {
+        String[] sources = new String[texts.length];
+        for (int i = 0; i < texts.length; i++) {
+            int group = i < groupIds.length ? groupIds[i] : -1;
+            String source = group >= 0 && group < groupSources.length ? groupSources[group] : fallback;
+            if (source == null || source.isEmpty() || "und".equals(source)) {
+                source = fallback;
+            }
+            sources[i] = source;
+        }
+        dispatchSources(session, base, texts, sources);
     }
 
     private static String inferScriptLanguage(String sample, String target) {
@@ -436,18 +559,42 @@ public final class PageTranslator {
     }
 
     private static void dispatch(Session session, int base, String[] texts) {
+        String[] sources = new String[texts.length];
+        Arrays.fill(sources, session.source);
+        dispatchSources(session, base, texts, sources);
+    }
+
+    private static void dispatchSources(Session session, int base, String[] texts, String[] sources) {
         session.started = true;
+        String target = primary(session.target);
         int from = 0;
         while (from < texts.length) {
+            String source = from < sources.length ? primary(sources[from]) : "";
+            if (source.isEmpty() || "und".equals(source) || source.equals(target)) {
+                from++;
+                continue;
+            }
             int to = from;
             int chars = 0;
-            while (to < texts.length && to - from < CHUNK_SEGMENTS && (to == from || chars + texts[to].length() <= CHUNK_CHARS)) {
-                chars += texts[to].length();
+            while (to < texts.length && to - from < CHUNK_SEGMENTS) {
+                String nextSource = to < sources.length ? primary(sources[to]) : "";
+                if (!source.equals(nextSource)) {
+                    break;
+                }
+                int nextLength = texts[to] == null ? 0 : texts[to].length();
+                if (to > from && chars + nextLength > CHUNK_CHARS) {
+                    break;
+                }
+                chars += nextLength;
                 to++;
+            }
+            if (to <= from) {
+                from++;
+                continue;
             }
             String[] part = new String[to - from];
             System.arraycopy(texts, from, part, 0, part.length);
-            Chunk chunk = new Chunk(base + from, part);
+            Chunk chunk = new Chunk(base + from, part, source);
             session.pending++;
             if (session.online) {
                 runOnline(session, chunk);
@@ -456,10 +603,13 @@ public final class PageTranslator {
             }
             from = to;
         }
+        if (session.pending == 0) {
+            schedulePoll(session);
+        }
     }
 
     private static void runOnline(Session session, Chunk chunk) {
-        final String source = session.source;
+        final String source = chunk.source;
         final String target = session.target;
         executor().execute(() -> {
             String[] translated = null;
@@ -570,16 +720,19 @@ public final class PageTranslator {
             session.mlRunning = false;
             return;
         }
-        Translator translator = translator(session.source, session.target);
+        Translator translator = translator(chunk.source, session.target);
         if (translator == null) {
-            mlFail(session, "翻訳に失敗しました。ネットワーク接続を確認してください");
+            session.mlRunning = false;
+            finish(session);
+            mlPump(session);
             return;
         }
-        ensureModel(session, translator, () -> mlTranslate(session, translator, chunk, new String[chunk.texts.length], 0));
+        ensureModel(session, translator, chunk.source, () -> mlTranslate(session, translator, chunk, new String[chunk.texts.length], 0));
     }
 
-    private static void ensureModel(Session session, Translator translator, Runnable ready) {
-        if (session.mlReady) {
+    private static void ensureModel(Session session, Translator translator, String source, Runnable ready) {
+        String key = primary(source) + ">" + primary(session.target);
+        if (session.mlReadySources.contains(key)) {
             ready.run();
             return;
         }
@@ -594,7 +747,7 @@ public final class PageTranslator {
             translator.downloadModelIfNeeded(new DownloadConditions.Builder().build())
                     .addOnSuccessListener(unused -> {
                         UiThread.mainHandler().removeCallbacks(hint);
-                        session.mlReady = true;
+                        session.mlReadySources.add(key);
                         if (alive(session)) {
                             ready.run();
                         } else {
