@@ -18,6 +18,7 @@
         </menu>
     </item>
     <item android:id="@+id/action_find_in_page" android:title="ページ内検索" />
+    <item android:id="@+id/action_translate" android:title="ページを翻訳" />
     <item android:id="@+id/action_screenshot" android:title="スクリーンショット" />
     <item android:id="@+id/action_history" android:title="ページ履歴" />
     <item android:id="@+id/action_downloads" android:title="ダウンロード一覧" />
@@ -29,7 +30,6 @@
             <item android:id="@+id/action_negapoji" android:title="ネガポジ" />
             <item android:id="@+id/action_deskua" android:title="デスクトップ表示" android:checkable="true" />
             <item android:id="@+id/action_ct3ua" android:title="CT3UA" android:checkable="true" />
-            <item android:id="@+id/action_translate" android:title="ページを翻訳" />
             <item android:id="@+id/action_translate_settings" android:title="翻訳設定" />
         </menu>
     </item>
