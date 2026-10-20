@@ -252,56 +252,187 @@ public final class PageTranslator {
         }
         int base = result.optInt("base", 0);
         String lang = result.optString("lang", "");
-        if (first && session.silent && session.source == null && primary(lang).equals(primary(session.target))) {
-            abort(session, "");
-            return;
-        }
         if (session.source != null && session.source.equals(primary(session.target))) {
             abort(session, "翻訳元と翻訳先が同じ言語です");
             return;
         }
         if (session.source == null) {
-            detect(session, texts, lang, base);
+            detect(session, texts, lang, result.optString("contentLang", ""), result.optString("sample", ""), base);
         } else {
             dispatch(session, base, texts);
         }
     }
 
-    private static void detect(Session session, String[] texts, String htmlLang, int base) {
-        StringBuilder sample = new StringBuilder();
-        for (String text : texts) {
-            if (sample.length() >= 800) {
-                break;
+    private static void detect(Session session, String[] texts, String htmlLang, String contentLang, String sample, int base) {
+        String detectionText = sample == null ? "" : sample.trim();
+        if (detectionText.isEmpty()) {
+            StringBuilder fallback = new StringBuilder();
+            for (String text : texts) {
+                if (text == null || text.trim().isEmpty()) {
+                    continue;
+                }
+                if (fallback.length() > 0) {
+                    fallback.append(' ');
+                }
+                int remaining = 1200 - fallback.length();
+                if (remaining <= 0) {
+                    break;
+                }
+                String clean = text.trim();
+                fallback.append(clean, 0, Math.min(clean.length(), remaining));
             }
-            sample.append(text).append(' ');
+            detectionText = fallback.toString();
         }
+        if (detectionText.length() > 1200) {
+            detectionText = detectionText.substring(0, 1200);
+        }
+        final String textSample = detectionText;
         try {
-            identifier().identifyLanguage(sample.toString())
-                    .addOnSuccessListener(tag -> onSource(session, tag, htmlLang, base, texts))
-                    .addOnFailureListener(e -> onSource(session, "und", htmlLang, base, texts));
+            identifier().identifyLanguage(textSample)
+                    .addOnSuccessListener(tag -> onSource(session, tag, htmlLang, contentLang, textSample, base, texts))
+                    .addOnFailureListener(e -> onSource(session, "und", htmlLang, contentLang, textSample, base, texts));
         } catch (Throwable t) {
-            onSource(session, "und", htmlLang, base, texts);
+            onSource(session, "und", htmlLang, contentLang, textSample, base, texts);
         }
     }
 
-    private static void onSource(Session session, String tag, String htmlLang, int base, String[] texts) {
+    private static void onSource(Session session, String tag, String htmlLang, String contentLang, String sample, int base, String[] texts) {
         WebView view = session.view.get();
         if (view == null || !alive(session)) {
             return;
         }
         String source = primary(tag);
+        String target = primary(session.target);
+        String inferred = inferScriptLanguage(sample, target);
+        String contentHint = primary(contentLang);
+        String pageHint = primary(htmlLang);
+        boolean contentHintValid = !contentHint.isEmpty() && !"und".equals(contentHint) && !contentHint.equals(target);
+        boolean pageHintValid = !pageHint.isEmpty() && !"und".equals(pageHint) && !pageHint.equals(target);
         if (source.isEmpty() || "und".equals(source)) {
-            source = primary(htmlLang);
+            if (!inferred.isEmpty()) {
+                if ("en".equals(inferred) && contentHintValid) {
+                    source = contentHint;
+                } else if ("en".equals(inferred) && pageHintValid) {
+                    source = pageHint;
+                } else if ("en".equals(inferred) && session.online) {
+                    source = "auto";
+                } else {
+                    source = inferred;
+                }
+            } else if (contentHintValid) {
+                source = contentHint;
+            } else if (pageHintValid) {
+                source = pageHint;
+            } else if (session.online) {
+                source = "auto";
+            } else if (!contentHint.isEmpty() || !pageHint.isEmpty()) {
+                abort(session, "このページの言語を判定できませんでした");
+                return;
+            }
+        } else if (source.equals(target) || (!inferred.isEmpty() && inferred.equals(target))) {
+            if (!inferred.isEmpty() && inferred.equals(target)) {
+                source = inferred;
+            } else if (!inferred.isEmpty() && "en".equals(inferred) && contentHintValid) {
+                source = contentHint;
+            } else if (!inferred.isEmpty() && "en".equals(inferred) && pageHintValid) {
+                source = pageHint;
+            } else if (!inferred.isEmpty() && "en".equals(inferred) && session.online) {
+                source = "auto";
+            } else if (!inferred.isEmpty()) {
+                source = inferred;
+            } else if (contentHintValid) {
+                source = contentHint;
+            } else if (pageHintValid) {
+                source = pageHint;
+            }
         }
-        if (source.isEmpty()) {
-            source = "auto";
+        if (source.isEmpty() || "und".equals(source)) {
+            if (session.online) {
+                source = "auto";
+            } else {
+                abort(session, "このページの言語を判定できませんでした");
+                return;
+            }
         }
-        if (source.equals(primary(session.target))) {
+        if (source.equals(target)) {
             abort(session, "このページは" + TranslateSettings.labelFor(session.target) + "です");
             return;
         }
         session.source = source;
         dispatch(session, base, texts);
+    }
+
+    private static String inferScriptLanguage(String sample, String target) {
+        if (sample == null || sample.isEmpty()) {
+            return "";
+        }
+        int latin = 0;
+        int kana = 0;
+        int han = 0;
+        int hangul = 0;
+        int cyrillic = 0;
+        int arabic = 0;
+        int devanagari = 0;
+        int thai = 0;
+        int ukraine = 0;
+        int letters = 0;
+        for (int i = 0; i < sample.length();) {
+            int cp = sample.codePointAt(i);
+            i += Character.charCount(cp);
+            if (!Character.isLetter(cp)) {
+                continue;
+            }
+            letters++;
+            if ((cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') || (cp >= 0x00C0 && cp <= 0x024F) || (cp >= 0x1E00 && cp <= 0x1EFF)) {
+                latin++;
+            } else if ((cp >= 0x3040 && cp <= 0x30FF) || (cp >= 0x31F0 && cp <= 0x31FF)) {
+                kana++;
+            } else if ((cp >= 0x3400 && cp <= 0x4DBF) || (cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0xF900 && cp <= 0xFAFF)) {
+                han++;
+            } else if (cp >= 0xAC00 && cp <= 0xD7AF) {
+                hangul++;
+            } else if ((cp >= 0x0400 && cp <= 0x052F) || (cp >= 0x2DE0 && cp <= 0x2DFF) || (cp >= 0xA640 && cp <= 0xA69F)) {
+                cyrillic++;
+                if (cp == 0x0406 || cp == 0x0456 || cp == 0x0407 || cp == 0x0457 || cp == 0x0490 || cp == 0x0491 || cp == 0x0454 || cp == 0x0404) {
+                    ukraine++;
+                }
+            } else if ((cp >= 0x0600 && cp <= 0x06FF) || (cp >= 0x0750 && cp <= 0x077F) || (cp >= 0x08A0 && cp <= 0x08FF)) {
+                arabic++;
+            } else if ((cp >= 0x0900 && cp <= 0x097F) || (cp >= 0xA8E0 && cp <= 0xA8FF)) {
+                devanagari++;
+            } else if (cp >= 0x0E00 && cp <= 0x0E7F) {
+                thai++;
+            }
+        }
+        if (letters < 8) {
+            return "";
+        }
+        int nonLatin = kana + han + hangul + cyrillic + arabic + devanagari + thai;
+        if (kana >= 4 && kana * 5 >= Math.max(1, latin) && kana + han >= latin / 3) {
+            return "ja";
+        }
+        if (hangul >= 8 && hangul * 2 >= Math.max(1, latin)) {
+            return "ko";
+        }
+        if (thai >= 8 && thai * 2 >= Math.max(1, latin)) {
+            return "th";
+        }
+        if (arabic >= 8 && arabic * 2 >= Math.max(1, latin)) {
+            return "ar";
+        }
+        if (devanagari >= 8 && devanagari * 2 >= Math.max(1, latin)) {
+            return "hi";
+        }
+        if (cyrillic >= 8 && cyrillic * 2 >= Math.max(1, latin)) {
+            return ukraine * 2 >= cyrillic ? "uk" : "ru";
+        }
+        if (han >= 8 && kana == 0 && han * 2 >= Math.max(1, latin)) {
+            return "zh";
+        }
+        if (latin >= 12 && nonLatin * 4 < latin && ("ja".equals(target) || "zh".equals(target) || "ko".equals(target) || "ru".equals(target) || "uk".equals(target) || "ar".equals(target) || "hi".equals(target) || "th".equals(target))) {
+            return "en";
+        }
+        return "";
     }
 
     private static void dispatch(Session session, int base, String[] texts) {
@@ -619,7 +750,7 @@ public final class PageTranslator {
     private static LanguageIdentifier identifier() {
         if (identifier == null) {
             identifier = LanguageIdentification.getClient(
-                    new LanguageIdentificationOptions.Builder().setConfidenceThreshold(0.5f).build());
+                    new LanguageIdentificationOptions.Builder().setConfidenceThreshold(0.65f).build());
         }
         return identifier;
     }
