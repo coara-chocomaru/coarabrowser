@@ -269,6 +269,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
     private final Set<WebView> backNavigationTabs = Collections.newSetFromMap(new WeakHashMap<WebView, Boolean>());
     private final Set<WebView> customBackTabs = Collections.newSetFromMap(new WeakHashMap<WebView, Boolean>());
     private final Set<WebView> customBackNavigationTabs = Collections.newSetFromMap(new WeakHashMap<WebView, Boolean>());
+    private final Set<WebView> clearHistoryAfterStartPageTabs = Collections.newSetFromMap(new WeakHashMap<WebView, Boolean>());
     private final Set<WebView> dirtyStateTabs = Collections.newSetFromMap(new WeakHashMap<WebView, Boolean>());
     private final Set<WebView> dirtySnapshotTabs = Collections.newSetFromMap(new WeakHashMap<WebView, Boolean>());
     private boolean historyDirty = false;
@@ -790,7 +791,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
     }
 
     private boolean goBackInCurrentTab(WebView view) {
-        if (view == null) {
+        if (view == null || clearHistoryAfterStartPageTabs.contains(view)) {
             return false;
         }
         TabHistoryStore.State state = getTabHistoryState(view);
@@ -1373,7 +1374,13 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 PendingTab pending = pendingTabs.get(webView);
                 String url;
                 String title;
-                if (pending != null) {
+                if (clearHistoryAfterStartPageTabs.contains(webView)) {
+                    url = START_PAGE;
+                    title = "";
+                    tabHistoryStates.put(webView, new TabHistoryStore.State());
+                    tabHistoryStore.delete(id);
+                    safeDeleteFile(new File(getFilesDir(), "tab_state_" + id + ".dat"));
+                } else if (pending != null) {
                     url = pending.url;
                     title = pending.title;
                     TabHistoryStore.State historyState = tabHistoryStates.get(webView);
@@ -2203,6 +2210,24 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 }
                 boolean customBackNavigation = customBackNavigationTabs.remove(view);
                 boolean backNavigation = backNavigationTabs.remove(view);
+                boolean clearHistoryAfterStartPage = clearHistoryAfterStartPageTabs.contains(view)
+                        && url.equals(view.getUrl());
+                if (clearHistoryAfterStartPage) {
+                    clearHistoryAfterStartPageTabs.remove(view);
+                    try {
+                        view.clearHistory();
+                    } catch (Exception ignored) {
+                    }
+                    int id = getTabId(view);
+                    TabHistoryStore.State cleanState = new TabHistoryStore.State();
+                    cleanState.record(url, view.getTitle(), MAX_TAB_HISTORY_SIZE);
+                    tabHistoryStates.put(view, cleanState);
+                    if (id >= 0 && tabHistoryStore != null) {
+                        tabHistoryStore.save(id, cleanState);
+                        safeDeleteFile(new File(getFilesDir(), "tab_state_" + id + ".dat"));
+                    }
+                    dirtyStateTabs.remove(view);
+                }
                 if (customBackNavigation) {
                     saveTabHistoryState(view);
                 } else if (customBackTabs.contains(view)) {
@@ -4414,6 +4439,9 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         purgeTabFiles();
         purgeFaviconFiles();
         clearTabs();
+        if (tabHistoryStore != null) {
+            tabHistoryStore.deleteAll();
+        }
         if (faviconCache != null) {
             faviconCache.evictAll();
         }
@@ -4506,6 +4534,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 backNavigationTabs.remove(w);
                 customBackTabs.remove(w);
                 customBackNavigationTabs.remove(w);
+                clearHistoryAfterStartPageTabs.remove(w);
                 originalUserAgents.remove(w);
                 if (id != -1) {
                     if (tabHistoryStore != null) {
@@ -4529,17 +4558,33 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
             webViews.add(current);
             currentTabIndex = 0;
             int currentId = getTabId(current);
+            pendingTabs.remove(current);
             if (currentId >= 0 && tabHistoryStore != null) {
                 tabHistoryStore.delete(currentId);
             }
-            tabHistoryStates.remove(current);
+            tabHistoryStates.put(current, new TabHistoryStore.State());
             backNavigationTabs.remove(current);
             customBackTabs.remove(current);
             customBackNavigationTabs.remove(current);
+            dirtyStateTabs.remove(current);
+            dirtySnapshotTabs.remove(current);
+            if (currentId >= 0) {
+                safeDeleteFile(new File(getFilesDir(), "tab_state_" + currentId + ".dat"));
+                safeDeleteFile(new File(getFilesDir(), "tab_snapshot_" + currentId + ".png"));
+            }
+            try {
+                current.stopLoading();
+            } catch (Exception ignored) {
+            }
             try {
                 current.clearHistory();
+            } catch (Exception ignored) {
+            }
+            clearHistoryAfterStartPageTabs.add(current);
+            try {
                 current.loadUrl(START_PAGE);
             } catch (Exception ignored) {
+                clearHistoryAfterStartPageTabs.remove(current);
             }
             webViewContainer.removeAllViews();
             webViewContainer.addView(current);
