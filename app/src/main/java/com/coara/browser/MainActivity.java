@@ -4413,6 +4413,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         dirtySnapshotTabs.clear();
         purgeTabFiles();
         purgeFaviconFiles();
+        clearTabs();
         if (faviconCache != null) {
             faviconCache.evictAll();
         }
