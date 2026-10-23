@@ -15,7 +15,7 @@ public final class DesktopContentOptimizer {
     private static final String VERSION = "3";
     private static final int MAX_SCRIPT_CHARS = 16000;
     private static final Pattern CHROME_VERSION = Pattern.compile("Chrome/(\\d+)");
-    private static final Map<WebView, Boolean> ACTIVE = Collections.synchronizedMap(new WeakHashMap<WebView, Boolean>());
+    private static final Map<WebView, String> ACTIVE = Collections.synchronizedMap(new WeakHashMap<WebView, String>());
     private static final String CSS = "*,*::before,*::after{box-sizing:border-box;}" +
             "html{width:100%;max-width:100%;}" +
             "body{max-width:100vw;min-width:0 !important;overflow-x:auto;-webkit-text-size-adjust:100%;}" +
@@ -43,6 +43,12 @@ public final class DesktopContentOptimizer {
         return "";
     }
 
+    public static void onPageStarted(WebView webView) {
+        if (webView != null) {
+            ACTIVE.remove(webView);
+        }
+    }
+
     public static void apply(WebView webView, boolean enabled) {
         if (webView == null) {
             return;
@@ -62,13 +68,26 @@ public final class DesktopContentOptimizer {
             int heightPx = webView.getHeight() > 0 ? webView.getHeight() : webView.getResources().getDisplayMetrics().heightPixels;
             int widthDp = Math.max(1, Math.round(widthPx / density));
             int heightDp = Math.max(1, Math.round(heightPx / density));
+            String url = webView.getUrl();
+            String urlKey = url == null ? "" : url;
+            int query = urlKey.indexOf('?');
+            int fragment = urlKey.indexOf('#');
+            int end = urlKey.length();
+            if (query >= 0 && query < end) end = query;
+            if (fragment >= 0 && fragment < end) end = fragment;
+            urlKey = urlKey.substring(0, end);
+            String key = urlKey + "|" + widthDp + "|" + heightDp;
+            if (key.equals(ACTIVE.get(webView))) {
+                return;
+            }
             String script = scriptFor(widthDp, heightDp);
             if (script == null) {
                 return;
             }
-            ACTIVE.put(webView, Boolean.TRUE);
+            ACTIVE.put(webView, key);
             webView.evaluateJavascript(script, null);
         } catch (Throwable ignored) {
+            ACTIVE.remove(webView);
         }
     }
 

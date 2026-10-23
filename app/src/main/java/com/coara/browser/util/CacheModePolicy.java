@@ -3,6 +3,7 @@ package com.coara.browser.util;
 import android.net.Uri;
 import android.util.LruCache;
 import android.webkit.WebSettings;
+import android.webkit.WebView;
 import java.util.Locale;
 import java.util.regex.Pattern;
 
@@ -138,5 +139,25 @@ public final class CacheModePolicy {
         if (base == WebSettings.LOAD_NO_CACHE) return WebSettings.LOAD_NO_CACHE;
         if (isSpa) return WebSettings.LOAD_DEFAULT;
         return base;
+    }
+
+    public static void applyTo(WebView view, String url) {
+        if (view == null) return;
+        try {
+            WebSettings settings = view.getSettings();
+            int mode = determineForUrl(url);
+            if (settings.getCacheMode() != mode) settings.setCacheMode(mode);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public static void applyPostLoadTo(WebView view, String url, boolean isSpa) {
+        if (view == null) return;
+        try {
+            WebSettings settings = view.getSettings();
+            int mode = determinePostLoad(url, isSpa);
+            if (settings.getCacheMode() != mode) settings.setCacheMode(mode);
+        } catch (Throwable ignored) {
+        }
     }
 }
