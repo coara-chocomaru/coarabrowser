@@ -343,6 +343,20 @@ public final class PluginRuntime {
         }
     }
 
+    public static void trimMemory(boolean critical) {
+        synchronized (SCRIPT_CACHE) {
+            SCRIPT_CACHE.clear();
+            SCRIPT_CACHE_CHARS = 0;
+        }
+        if (critical) {
+            synchronized (PluginRuntime.class) {
+                PRELUDES.clear();
+                runtimeTemplate = null;
+                watchdogTemplate = null;
+            }
+        }
+    }
+
     private static void injectFallback(final WebView view, final String url) {
         if (view == null || url == null) {
             return;
@@ -418,6 +432,10 @@ public final class PluginRuntime {
     private static void syncStartScripts(WebView view, ViewState state, PluginManager manager) {
         removeHandlers(state);
         state.startScriptsActive = false;
+        if (!view.getSettings().getJavaScriptEnabled()) {
+            state.appliedVersion = -1;
+            return;
+        }
         state.appliedVersion = manager.version();
         boolean supported;
         try {
