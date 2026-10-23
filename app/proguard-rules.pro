@@ -21,8 +21,6 @@
     public void onPostMessage(android.webkit.WebView, androidx.webkit.WebMessageCompat, android.net.Uri, boolean, androidx.webkit.JavaScriptReplyProxy);
 }
 
--keepnames class com.coara.browser.MainActivity
-
 -assumenosideeffects class android.util.Log {
     public static int v(...);
     public static int d(...);
