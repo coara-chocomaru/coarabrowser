@@ -3,7 +3,6 @@ package com.coara.browser.plugin;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.SystemClock;
 import android.util.Base64;
 import android.widget.Toast;
 
@@ -90,12 +89,7 @@ public final class PluginManager {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<PluginInfo> plugins = new ArrayList<>();
     private final Map<String, ArrayDeque<Long>> recentErrors = new HashMap<>();
-    private final Map<String, JSONObject> storageCache = new java.util.LinkedHashMap<String, JSONObject>(8, 0.75f, true) {
-        @Override
-        protected boolean removeEldestEntry(Map.Entry<String, JSONObject> eldest) {
-            return size() > 8;
-        }
-    };
+    private final Map<String, JSONObject> storageCache = new HashMap<>();
     private final Map<String, String> sourceCache = new java.util.LinkedHashMap<>(16, 0.75f, true);
     private int sourceCacheChars;
     private final Map<String, long[]> logRate = new HashMap<>();
@@ -115,7 +109,6 @@ public final class PluginManager {
 
     private boolean loaded = false;
     private long indexStamp = -1L;
-    private long lastIndexStampCheckAt = 0L;
     private int version = 0;
     private int runtimeVersion = 0;
     private long lastInjectionAt = 0L;
@@ -218,24 +211,6 @@ public final class PluginManager {
         return appContext;
     }
 
-    public synchronized void trimMemory(boolean critical) {
-        sourceCache.clear();
-        sourceCacheChars = 0;
-        synchronized (xhrs) {
-            long now = System.currentTimeMillis();
-            Iterator<Map.Entry<String, XhrState>> it = xhrs.entrySet().iterator();
-            while (it.hasNext()) {
-                XhrState state = it.next().getValue();
-                if (state.result != null && now - state.doneAt > 30_000L) {
-                    it.remove();
-                }
-            }
-        }
-        if (critical) {
-            storageCache.clear();
-        }
-    }
-
     public File pluginDir(String id) {
         return new File(root, id);
     }
@@ -265,11 +240,6 @@ public final class PluginManager {
             ensureLoadedLocked();
             return true;
         }
-        long now = SystemClock.elapsedRealtime();
-        if (now >= lastIndexStampCheckAt && now - lastIndexStampCheckAt < 500L) {
-            return false;
-        }
-        lastIndexStampCheckAt = now;
         if (stamp() != indexStamp) {
             loadLocked();
             version++;
@@ -1404,7 +1374,6 @@ public final class PluginManager {
             }
         }
         indexStamp = stamp();
-        lastIndexStampCheckAt = SystemClock.elapsedRealtime();
         loaded = true;
     }
 
@@ -1419,7 +1388,6 @@ public final class PluginManager {
             logger.log("E", "-", "インデックスの保存に失敗: " + e);
         }
         indexStamp = stamp();
-        lastIndexStampCheckAt = SystemClock.elapsedRealtime();
         if (runtimeChanged) {
             version++;
         }
