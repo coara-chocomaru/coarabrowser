@@ -76,7 +76,7 @@ public class KeyboardGameWebView extends WebView {
         if (forceNoCacheOnNavigation) {
             getSettings().setCacheMode(WebSettings.LOAD_NO_CACHE);
         } else if (urlAwareCachePolicyEnabled) {
-            CacheModePolicy.applyTo(this, url);
+            getSettings().setCacheMode(CacheModePolicy.determineForUrl(url));
         }
     }
 
