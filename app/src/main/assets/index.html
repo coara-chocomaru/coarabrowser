@@ -95,6 +95,7 @@
       animation-timing-function: ease-in-out;
       will-change: transform, opacity;
     }
+    .motion-paused, .motion-paused * { animation-play-state: paused !important; }
     .fluffy.snow { animation: floatSnow 8s forwards; }
     @keyframes floatSnow {
       0% { transform: translateY(0) rotate(0deg); opacity: 0.8; }
@@ -248,9 +249,13 @@
     const patterns = ['snow', 'feather', 'petal', 'bubble', 'leaf', 'star', 'cloud', 'sparkle'];
     const patternSymbols = { snow: '❄', feather: '🪶', petal: '❀', bubble: '○', leaf: '🍂', star: '★', cloud: '☁', sparkle: '✨', bird: '🐦' };
     const patternTop = { snow: "-10vh", feather: "110vh", petal: "-10vh", bubble: "110vh", leaf: "-10vh", star: "110vh", cloud: null, sparkle: null };
+    let fluffyTimer = null;
+    let birdTimer = null;
+
     function createFluffy() {
-      const fluffies = document.querySelectorAll('.fluffy');
-      if (fluffies.length > 30) return;
+      if (document.hidden) return;
+      const fluffies = document.getElementsByClassName('fluffy');
+      if (fluffies.length >= 30) return;
       const pattern = patterns[Math.floor(Math.random() * patterns.length)];
       const div = document.createElement('div');
       div.classList.add('fluffy', pattern);
@@ -263,9 +268,8 @@
       document.body.appendChild(div);
       setTimeout(() => div.remove(), duration * 1000);
     }
-    setInterval(createFluffy, 1000);
-
     function createBird() {
+      if (document.hidden || document.getElementsByClassName('fluffy').length >= 30) return;
       const div = document.createElement('div');
       div.classList.add('fluffy', 'bird');
       div.textContent = patternSymbols['bird'];
@@ -277,10 +281,35 @@
       setTimeout(() => div.remove(), duration * 1000);
     }
     function scheduleBird() {
+      if (document.hidden || birdTimer !== null) return;
       const delay = 15000 + Math.random() * 20000;
-      setTimeout(() => { createBird(); scheduleBird(); }, delay);
+      birdTimer = setTimeout(() => {
+        birdTimer = null;
+        createBird();
+        scheduleBird();
+      }, delay);
     }
-    scheduleBird();
+
+    function updateDecorations() {
+      if (document.hidden) {
+        if (fluffyTimer !== null) {
+          clearInterval(fluffyTimer);
+          fluffyTimer = null;
+        }
+        if (birdTimer !== null) {
+          clearTimeout(birdTimer);
+          birdTimer = null;
+        }
+        document.body.classList.add('motion-paused');
+        return;
+      }
+      document.body.classList.remove('motion-paused');
+      if (fluffyTimer === null) fluffyTimer = setInterval(createFluffy, 1000);
+      scheduleBird();
+    }
+
+    document.addEventListener('visibilitychange', updateDecorations);
+    updateDecorations();
 
     const inputField = document.querySelector('input[type="text"]');
     inputField.addEventListener('focus', () => inputField.style.transform = 'scale(1.05)');
@@ -325,47 +354,279 @@
     const bgClear = document.getElementById('bgClear');
     const MAX_SIZE_LOWER = 2 * 1024 * 1024;
     const MAX_SIZE_UPPER = 8 * 1024 * 1024;
+    const MAX_DATA_URL_CHARS = 3 * 1024 * 1024;
+    const MAX_IMAGE_DIMENSION = 1920;
+    const MAX_IMAGE_PIXELS = 4 * 1024 * 1024;
+    const BACKGROUND_DATA_URL = /^data:image\/(?:png|jpe?g|webp|gif|bmp|avif);base64,[A-Za-z0-9+/=]*$/i;
+    const MAX_SOURCE_IMAGE_DIMENSION = 16384;
+    const MAX_SOURCE_IMAGE_PIXELS = 16 * 1024 * 1024;
+    const MAX_IMAGE_HEADER_BYTES = 1024 * 1024;
+    const MAX_SVG_SOURCE_BYTES = 1024 * 1024;
+
+    function readBlobArrayBuffer(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error('画像ヘッダーを読み込めませんでした。'));
+        reader.onabort = () => reject(new Error('画像の読み込みが中断されました。'));
+        reader.readAsArrayBuffer(blob);
+      });
+    }
+
+    function imageDimensionsFromBytes(bytes, isSvg) {
+      const u16le = (i) => i >= 0 && i + 1 < bytes.length ? bytes[i] | (bytes[i + 1] << 8) : 0;
+      const u24le = (i) => i >= 0 && i + 2 < bytes.length ? bytes[i] | (bytes[i + 1] << 8) | (bytes[i + 2] << 16) : 0;
+      const u32le = (i) => i >= 0 && i + 3 < bytes.length ? (bytes[i] | (bytes[i + 1] << 8) | (bytes[i + 2] << 16) | (bytes[i + 3] << 24)) >>> 0 : 0;
+      const i32le = (i) => i >= 0 && i + 3 < bytes.length ? bytes[i] | (bytes[i + 1] << 8) | (bytes[i + 2] << 16) | (bytes[i + 3] << 24) : 0;
+      const u32be = (i) => i >= 0 && i + 3 < bytes.length ? ((bytes[i] << 24) | (bytes[i + 1] << 16) | (bytes[i + 2] << 8) | bytes[i + 3]) >>> 0 : 0;
+      const textAt = (i, value) => {
+        if (i < 0 || i + value.length > bytes.length) return false;
+        for (let j = 0; j < value.length; j++) if (bytes[i + j] !== value.charCodeAt(j)) return false;
+        return true;
+      };
+      if (isSvg) {
+        const source = new TextDecoder('utf-8').decode(bytes);
+        if (/<!DOCTYPE|<!ENTITY/i.test(source)) throw new Error('DOCTYPE または ENTITY を含む SVG は使用できません。');
+        const normalized = source.replace(/^\uFEFF?\s*(?:<\?xml\b[^?]*\?>\s*)?(?:<!--[\s\S]*?-->\s*)*/i, '');
+        const root = normalized.match(/^<svg\b((?:"[^"]*"|'[^']*'|[^'">])*)>/i);
+        if (!root) throw new Error('SVG の形式を確認できませんでした。');
+        const attrs = root[1];
+        const getAttr = (name) => {
+          const match = attrs.match(new RegExp('(?:^|\\s)' + name + '\\s*=\\s*["\']([^"\']*)["\']', 'i'));
+          return match ? match[1].trim() : '';
+        };
+        const parseLength = (value) => {
+          const match = String(value || '').match(/^([0-9]+(?:\.[0-9]+)?)(px|in|cm|mm|pt|pc)?$/i);
+          if (!match) return 0;
+          const amount = Number(match[1]);
+          const unit = (match[2] || 'px').toLowerCase();
+          const factor = unit === 'in' ? 96 : unit === 'cm' ? 96 / 2.54 : unit === 'mm' ? 96 / 25.4 : unit === 'pt' ? 96 / 72 : unit === 'pc' ? 16 : 1;
+          return Math.ceil(amount * factor);
+        };
+        const rawWidth = getAttr('width');
+        const rawHeight = getAttr('height');
+        let width = parseLength(rawWidth);
+        let height = parseLength(rawHeight);
+        const isPercent = (value) => /^\d+(?:\.\d+)?%$/.test(value);
+        if ((rawWidth && width < 1 && !isPercent(rawWidth)) || (rawHeight && height < 1 && !isPercent(rawHeight))) {
+          throw new Error('SVG の寸法形式を確認できませんでした。');
+        }
+        const viewBox = getAttr('viewBox').split(/[ ,]+/).map(Number);
+        if ((width < 1 || height < 1) && viewBox.length === 4 && viewBox.every(Number.isFinite) && viewBox[2] > 0 && viewBox[3] > 0) {
+          if (width < 1) width = Math.ceil(viewBox[2]);
+          if (height < 1) height = Math.ceil(viewBox[3]);
+        }
+        if (width < 1) width = 300;
+        if (height < 1) height = 150;
+        return { width, height };
+      }
+      if (bytes.length >= 24 && textAt(0, '\x89PNG\r\n\x1a\n')) {
+        return { width: u32be(16), height: u32be(20) };
+      }
+      if (bytes.length >= 10 && (textAt(0, 'GIF87a') || textAt(0, 'GIF89a'))) {
+        return { width: u16le(6), height: u16le(8) };
+      }
+      if (bytes.length >= 26 && textAt(0, 'BM')) {
+        const dibSize = u32le(14);
+        if (dibSize === 12) return { width: u16le(18), height: u16le(20) };
+        return { width: Math.abs(i32le(18)), height: Math.abs(i32le(22)) };
+      }
+      if (bytes.length >= 30 && textAt(0, 'RIFF') && textAt(8, 'WEBP')) {
+        if (textAt(12, 'VP8X')) return { width: u24le(24) + 1, height: u24le(27) + 1 };
+        if (textAt(12, 'VP8L') && bytes[20] === 0x2f) {
+          return {
+            width: 1 + (bytes[21] | ((bytes[22] & 0x3f) << 8)),
+            height: 1 + (((bytes[22] & 0xc0) >> 6) | (bytes[23] << 2) | ((bytes[24] & 0x0f) << 10))
+          };
+        }
+        if (textAt(12, 'VP8 ') && textAt(23, '\x9d\x01\x2a')) {
+          return { width: (u16le(26) & 0x3fff), height: (u16le(28) & 0x3fff) };
+        }
+      }
+      if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+        const frameMarkers = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
+        let offset = 2;
+        while (offset + 4 <= bytes.length) {
+          if (bytes[offset] !== 0xff) { offset++; continue; }
+          while (offset < bytes.length && bytes[offset] === 0xff) offset++;
+          if (offset >= bytes.length) break;
+          const marker = bytes[offset++];
+          if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7) || marker === 0x01) continue;
+          if (offset + 2 > bytes.length) break;
+          const segmentLength = (bytes[offset] << 8) | bytes[offset + 1];
+          if (segmentLength < 2 || offset + segmentLength > bytes.length) break;
+          if (frameMarkers.has(marker) && segmentLength >= 7) {
+            return { height: (bytes[offset + 3] << 8) | bytes[offset + 4], width: (bytes[offset + 5] << 8) | bytes[offset + 6] };
+          }
+          offset += segmentLength;
+        }
+        return null;
+      }
+      if (bytes.length >= 16 && (textAt(4, 'ftyp') || textAt(4, 'meta') || textAt(4, 'mdat'))) {
+        for (let i = 4; i + 16 < bytes.length; i++) {
+          if (textAt(i, 'ispe')) {
+            const width = u32be(i + 8);
+            const height = u32be(i + 12);
+            if (width > 0 && height > 0) return { width, height };
+          }
+        }
+      }
+      return null;
+    }
+
+    async function inspectImageDimensions(file, isSvg) {
+      if (isSvg && file.size > MAX_SVG_SOURCE_BYTES) throw new Error('SVG は1MiB以下のファイルを選択してください。');
+      const readSize = isSvg ? file.size : Math.min(file.size, MAX_IMAGE_HEADER_BYTES);
+      const buffer = await readBlobArrayBuffer(file.slice(0, readSize));
+      const dims = imageDimensionsFromBytes(new Uint8Array(buffer), isSvg);
+      if (!dims || !Number.isFinite(dims.width) || !Number.isFinite(dims.height) || dims.width < 1 || dims.height < 1) {
+        throw new Error('画像サイズを安全に確認できないため、この形式の画像は使用できません。');
+      }
+      if (dims.width > MAX_SOURCE_IMAGE_DIMENSION || dims.height > MAX_SOURCE_IMAGE_DIMENSION || dims.width * dims.height > MAX_SOURCE_IMAGE_PIXELS) {
+        throw new Error('画像の元サイズが大きすぎます。16メガピクセル以下の画像を選択してください。');
+      }
+      return dims;
+    }
+
+    function showBackgroundError(message) {
+      alert(message);
+    }
+
+    function storeBackground(dataUrl) {
+      if (typeof dataUrl !== 'string' || dataUrl.length > MAX_DATA_URL_CHARS || !BACKGROUND_DATA_URL.test(dataUrl)) {
+        showBackgroundError('画像データが大きすぎるか、対応していない形式です。');
+        return false;
+      }
+      try {
+        localStorage.setItem('bgImage', dataUrl);
+        document.body.style.backgroundImage = `url("${dataUrl}")`;
+        return true;
+      } catch (error) {
+        showBackgroundError('背景画像を保存できませんでした。別の画像をお試しください。');
+        return false;
+      }
+    }
 
     addEventListener('DOMContentLoaded', () => {
-      const savedBg = localStorage.getItem('bgImage');
-      if (savedBg) document.body.style.backgroundImage = `url(${savedBg})`;
+      try {
+        const savedBg = localStorage.getItem('bgImage');
+        if (savedBg && savedBg.length <= MAX_DATA_URL_CHARS && BACKGROUND_DATA_URL.test(savedBg)) {
+          document.body.style.backgroundImage = `url("${savedBg}")`;
+        } else if (savedBg) {
+          localStorage.removeItem('bgImage');
+        }
+      } catch (error) {
+      }
     });
 
     bgSelector.addEventListener('change', e => {
-      const file = e.target.files[0];
-      if (!file || file.size > MAX_SIZE_UPPER) {
-        if (file.size > MAX_SIZE_UPPER) alert("8MBを超える画像はサポートしていません。");
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      if (file.size <= 0 || file.size > MAX_SIZE_UPPER) {
+        showBackgroundError('8MB以下の画像を選択してください。');
+        bgSelector.value = '';
         return;
       }
-      const reader = new FileReader();
-      reader.onload = event => {
-        const dataUrl = event.target.result;
-        if (file.size > MAX_SIZE_LOWER) {
-          const img = new Image();
-          img.onload = () => {
-            const ratio = Math.sqrt(MAX_SIZE_LOWER / file.size);
-            const targetWidth = Math.floor(img.width * ratio);
-            const targetHeight = Math.floor(img.height * ratio);
-            const canvas = document.createElement('canvas');
-            canvas.width = targetWidth;
-            canvas.height = targetHeight;
-            const ctx = canvas.getContext('2d', { alpha: false });
-            ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
-            const optimizedDataUrl = canvas.toDataURL('image/jpeg', 0.8);
-            localStorage.setItem('bgImage', optimizedDataUrl);
-            document.body.style.backgroundImage = `url(${optimizedDataUrl})`;
-          };
-          img.src = dataUrl;
-        } else {
-          localStorage.setItem('bgImage', dataUrl);
-          document.body.style.backgroundImage = `url(${dataUrl})`;
+      const fileType = String(file.type || '').toLowerCase();
+      const fileName = String(file.name || '').toLowerCase();
+      const isSvg = fileType === 'image/svg+xml' || fileName.endsWith('.svg');
+      const supportedType = /^image\/(?:png|jpe?g|webp|gif|bmp|avif|svg\+xml)$/i.test(fileType)
+        || (!fileType && /\.(?:png|jpe?g|webp|gif|bmp|avif|svg)$/i.test(fileName));
+      if (!supportedType) {
+        showBackgroundError('PNG、JPEG、WebP、GIF、BMP、AVIF、SVG画像に対応しています。');
+        bgSelector.value = '';
+        return;
+      }
+      bgSelector.value = '';
+      inspectImageDimensions(file, isSvg).then(() => {
+        let objectUrl;
+        try {
+          objectUrl = URL.createObjectURL(file);
+        } catch (error) {
+          showBackgroundError('画像を開けませんでした。');
+          return;
         }
-      };
-      reader.readAsDataURL(file);
+        const img = new Image();
+        let released = false;
+        const releaseObjectUrl = () => {
+          if (released) return;
+          released = true;
+          URL.revokeObjectURL(objectUrl);
+        };
+        img.onerror = () => {
+          releaseObjectUrl();
+          showBackgroundError('画像を読み込めませんでした。');
+        };
+        img.onload = () => {
+          try {
+            const width = img.naturalWidth || img.width;
+            const height = img.naturalHeight || img.height;
+            if (width < 1 || height < 1 || width > MAX_SOURCE_IMAGE_DIMENSION || height > MAX_SOURCE_IMAGE_DIMENSION || width * height > MAX_SOURCE_IMAGE_PIXELS) {
+              showBackgroundError('画像サイズが上限を超えています。');
+              return;
+            }
+            const pixels = width * height;
+            const needsOptimization = isSvg
+              || file.size > MAX_SIZE_LOWER
+              || width > MAX_IMAGE_DIMENSION
+              || height > MAX_IMAGE_DIMENSION
+              || pixels > MAX_IMAGE_PIXELS;
+            if (!needsOptimization) {
+              const reader = new FileReader();
+              reader.onerror = () => showBackgroundError('画像を読み込めませんでした。');
+              reader.onabort = () => showBackgroundError('画像の読み込みが中断されました。');
+              reader.onload = event => {
+                storeBackground(event.target.result);
+              };
+              reader.readAsDataURL(file);
+              return;
+            }
+            let ratio = Math.min(
+              1,
+              MAX_IMAGE_DIMENSION / width,
+              MAX_IMAGE_DIMENSION / height,
+              Math.sqrt(MAX_IMAGE_PIXELS / pixels),
+              file.size > MAX_SIZE_LOWER ? Math.sqrt(MAX_SIZE_LOWER / file.size) : 1
+            );
+            const canvas = document.createElement('canvas');
+            let optimizedDataUrl = '';
+            for (let attempt = 0; attempt < 5; attempt++) {
+              const targetWidth = Math.max(1, Math.floor(width * ratio));
+              const targetHeight = Math.max(1, Math.floor(height * ratio));
+              canvas.width = targetWidth;
+              canvas.height = targetHeight;
+              const ctx = canvas.getContext('2d', { alpha: false });
+              if (!ctx) throw new Error('canvas unavailable');
+              ctx.fillStyle = '#ffffff';
+              ctx.fillRect(0, 0, targetWidth, targetHeight);
+              ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+              optimizedDataUrl = canvas.toDataURL('image/jpeg', 0.78);
+              if (optimizedDataUrl.length <= MAX_DATA_URL_CHARS && BACKGROUND_DATA_URL.test(optimizedDataUrl)) break;
+              optimizedDataUrl = '';
+              ratio *= 0.75;
+            }
+            if (!optimizedDataUrl) {
+              showBackgroundError('画像を安全なサイズに縮小できませんでした。');
+              return;
+            }
+            storeBackground(optimizedDataUrl);
+          } catch (error) {
+            showBackgroundError('背景画像を処理できませんでした。');
+          } finally {
+            releaseObjectUrl();
+          }
+        };
+        img.src = objectUrl;
+      }).catch(error => {
+        showBackgroundError(error && error.message ? error.message : '画像サイズを確認できませんでした。');
+      });
     });
 
     bgClear.addEventListener('click', () => {
-      localStorage.removeItem('bgImage');
+      try {
+        localStorage.removeItem('bgImage');
+      } catch (error) {
+      }
       document.body.style.backgroundImage = 'none';
       document.body.style.background = 'linear-gradient(135deg, #ff9a9e 0%, #fad0c4 100%)';
     });
