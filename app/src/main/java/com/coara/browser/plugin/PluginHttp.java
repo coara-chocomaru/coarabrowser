@@ -326,8 +326,10 @@ final class PluginHttp {
                     if (body != null && body.length > 0 && !method.equals("GET") && !method.equals("HEAD")) {
                         c.setDoOutput(true);
                         c.setFixedLengthStreamingMode(body.length);
-                        c.getOutputStream().write(body);
-                        c.getOutputStream().flush();
+                        try (java.io.OutputStream output = c.getOutputStream()) {
+                            output.write(body);
+                            output.flush();
+                        }
                     }
                     int code = c.getResponseCode();
                     if (!anonymous) {
@@ -467,7 +469,8 @@ final class PluginHttp {
             return "";
         }
         for (Map.Entry<String, List<String>> e : hf.entrySet()) {
-            if (e.getKey() == null) {
+            if (e.getKey() == null || e.getKey().equalsIgnoreCase("Set-Cookie")
+                    || e.getKey().equalsIgnoreCase("Set-Cookie2")) {
                 continue;
             }
             for (String v : e.getValue()) {
