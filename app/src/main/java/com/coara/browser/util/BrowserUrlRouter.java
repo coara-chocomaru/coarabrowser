@@ -204,6 +204,15 @@ public final class BrowserUrlRouter {
     }
 
     private static boolean sanitizeIntent(Activity activity, Intent intent) {
+        if (intent == null) {
+            return false;
+        }
+        String action = intent.getAction();
+        if (!Intent.ACTION_VIEW.equals(action)
+                && !Intent.ACTION_DIAL.equals(action)
+                && !Intent.ACTION_SENDTO.equals(action)) {
+            return false;
+        }
         int blocked = Intent.FLAG_GRANT_READ_URI_PERMISSION
                 | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                 | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
@@ -217,15 +226,20 @@ public final class BrowserUrlRouter {
             return false;
         }
         Uri data = intent.getData();
-        if (data != null) {
-            String sc = data.getScheme();
-            if (sc != null) {
-                sc = sc.toLowerCase(Locale.ROOT);
-                if (sc.equals("file") || sc.equals("content") || sc.equals("javascript") || sc.equals("data")
-                        || sc.equals("blob") || sc.equals("filesystem")) {
-                    return false;
-                }
+        String scheme = data == null ? null : data.getScheme();
+        if (scheme != null) {
+            scheme = scheme.toLowerCase(Locale.ROOT);
+            if (scheme.equals("file") || scheme.equals("content") || scheme.equals("javascript")
+                    || scheme.equals("data") || scheme.equals("blob") || scheme.equals("filesystem")) {
+                return false;
             }
+        }
+        if (Intent.ACTION_DIAL.equals(action)) {
+            return "tel".equals(scheme) || "telprompt".equals(scheme);
+        }
+        if (Intent.ACTION_SENDTO.equals(action)) {
+            return "mailto".equals(scheme) || "sms".equals(scheme) || "smsto".equals(scheme)
+                    || "mms".equals(scheme) || "mmsto".equals(scheme);
         }
         return true;
     }

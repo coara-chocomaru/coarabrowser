@@ -228,7 +228,7 @@ public final class PageTranslator {
             return;
         }
         try {
-            view.evaluateJavascript("window.__coaraTrTarget='" + session.target + "';" + script,
+            view.evaluateJavascript("window.__coaraTrTarget=" + JSONObject.quote(session.target == null ? "" : session.target) + ";" + script,
                     value -> onExtracted(session, value, first));
         } catch (Exception e) {
             abort(session, "翻訳できませんでした");
