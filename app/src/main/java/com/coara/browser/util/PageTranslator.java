@@ -44,6 +44,7 @@ public final class PageTranslator {
     private static final String ASSET_NAME = "page_translate.js";
     private static final int CHUNK_CHARS = 3000;
     private static final int CHUNK_SEGMENTS = 50;
+    private static final int MAX_TRANSLATION_RESPONSE_BYTES = 2 * 1024 * 1024;
     private static final long POLL_MS = 1000L;
     private static final long POLL_MAX_MS = 5000L;
     private static final long MODEL_HINT_DELAY_MS = 1500L;
@@ -683,10 +684,13 @@ public final class PageTranslator {
                 throw new java.io.IOException("http " + connection.getResponseCode());
             }
             try (InputStream in = connection.getInputStream()) {
-                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                ByteArrayOutputStream out = new ByteArrayOutputStream(8192);
                 byte[] buffer = new byte[8192];
                 int read;
                 while ((read = in.read(buffer)) != -1) {
+                    if (out.size() > MAX_TRANSLATION_RESPONSE_BYTES - read) {
+                        throw new java.io.IOException("translation response too large");
+                    }
                     out.write(buffer, 0, read);
                 }
                 JSONObject json = new JSONObject(new String(out.toByteArray(), StandardCharsets.UTF_8));

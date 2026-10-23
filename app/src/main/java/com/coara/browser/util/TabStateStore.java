@@ -11,6 +11,8 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 
 public final class TabStateStore {
+    private static final int MAX_STATE_BYTES = 16 * 1024 * 1024;
+
     private TabStateStore() {}
 
     public static void saveBundleToFile(File dir, Bundle bundle, String fileName) {
@@ -20,7 +22,13 @@ public final class TabStateStore {
         Parcel parcel = Parcel.obtain();
         try {
             bundle.writeToParcel(parcel, 0);
+            if (parcel.dataSize() <= 0 || parcel.dataSize() > MAX_STATE_BYTES) {
+                return;
+            }
             byte[] bytes = parcel.marshall();
+            if (bytes.length > MAX_STATE_BYTES) {
+                return;
+            }
             try (BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(temp))) {
                 bos.write(bytes);
                 bos.flush();
@@ -45,9 +53,11 @@ public final class TabStateStore {
     public static Bundle loadBundleFromFile(File dir, String fileName) {
         if (dir == null || fileName == null) return null;
         File file = new File(dir, fileName);
-        if (!file.exists()) return null;
+        if (!file.isFile()) return null;
+        long length = file.length();
+        if (length <= 0L || length > MAX_STATE_BYTES) return null;
         try (BufferedInputStream bis = new BufferedInputStream(new FileInputStream(file))) {
-            byte[] bytes = new byte[(int) file.length()];
+            byte[] bytes = new byte[(int) length];
             int offset = 0;
             while (offset < bytes.length) {
                 int read = bis.read(bytes, offset, bytes.length - offset);

@@ -8,6 +8,7 @@ import org.json.JSONObject;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.net.Uri;
 
 import java.text.Collator;
 import java.util.ArrayList;
@@ -29,6 +30,12 @@ public final class BookmarkStore {
     public static final int SORT_TITLE = 2;
     public static final int SORT_SITE = 3;
     public static final String[] SORT_LABELS = {"追加順", "新しい順", "名前順", "サイト順"};
+    public static final int MAX_IMPORT_CHARS = 2 * 1024 * 1024;
+    public static final int MAX_IMPORT_BOOKMARKS = 20000;
+    public static final int MAX_STORED_BOOKMARK_CHARS = 8 * 1024 * 1024;
+    public static final int MAX_SAVED_BOOKMARKS = 50000;
+    private static final int MAX_BOOKMARK_URL_LENGTH = 8192;
+    public static final int MAX_BOOKMARK_TITLE_LENGTH = 4096;
 
     private static final Pattern NETSCAPE_TOKEN = Pattern.compile(
         "<H3[^>]*>(.*?)</H3>|<A\\s[^>]*?HREF\\s*=\\s*\"([^\"]*)\"[^>]*>(.*?)</A>|<DL[^>]*>|</DL>",
@@ -50,6 +57,59 @@ public final class BookmarkStore {
     }
 
     private BookmarkStore() {
+    }
+
+    public static String sanitizeBookmarkTitle(String rawTitle) {
+        if (rawTitle == null) {
+            return "";
+        }
+        String title = rawTitle.trim();
+        if (title.length() > MAX_BOOKMARK_TITLE_LENGTH) {
+            title = title.substring(0, MAX_BOOKMARK_TITLE_LENGTH);
+        }
+        return title;
+    }
+
+    public static String sanitizeBookmarkUrl(String rawUrl) {
+        if (rawUrl == null) {
+            return null;
+        }
+        String value = rawUrl.trim();
+        if (value.isEmpty() || value.length() > MAX_BOOKMARK_URL_LENGTH) {
+            return null;
+        }
+        value = BrowserAssetLoader.normalizeLegacyAssetUrl(value);
+        if (value == null || value.isEmpty() || value.length() > MAX_BOOKMARK_URL_LENGTH) {
+            return null;
+        }
+        try {
+            Uri uri = Uri.parse(value);
+            String scheme = uri.getScheme();
+            String host = uri.getHost();
+            if (scheme == null || host == null || host.isEmpty() || uri.getUserInfo() != null) {
+                return null;
+            }
+            if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
+                return null;
+            }
+            if ("appassets.androidplatform.net".equalsIgnoreCase(host)) {
+                if (!"https".equalsIgnoreCase(scheme)) {
+                    return null;
+                }
+                String path = uri.getPath();
+                if (path == null || !(path.startsWith("/assets/") || path.startsWith("/res/"))) {
+                    return null;
+                }
+                for (String segment : uri.getPathSegments()) {
+                    if (".".equals(segment) || "..".equals(segment)) {
+                        return null;
+                    }
+                }
+            }
+            return value;
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     public static String normalizeUrl(String url) {
@@ -338,6 +398,9 @@ public final class BookmarkStore {
         }
         int added = 0;
         for (Bookmark b : incoming) {
+            if (target.size() >= MAX_SAVED_BOOKMARKS) {
+                break;
+            }
             String key = normalizeUrl(b.getUrl());
             if (key.isEmpty() || !seen.add(key)) {
                 continue;
@@ -349,7 +412,18 @@ public final class BookmarkStore {
     }
 
     public static List<Bookmark> parseJson(String json) throws JSONException {
-        String text = json == null ? "" : json.trim();
+        return parseJson(json, MAX_IMPORT_CHARS, MAX_IMPORT_BOOKMARKS);
+    }
+
+    public static List<Bookmark> parseStoredJson(String json) throws JSONException {
+        return parseJson(json, MAX_STORED_BOOKMARK_CHARS, MAX_SAVED_BOOKMARKS);
+    }
+
+    private static List<Bookmark> parseJson(String json, int maxChars, int maxBookmarks) throws JSONException {
+        if (json == null || json.length() > maxChars) {
+            throw new JSONException("入力データが上限を超えています");
+        }
+        String text = json.trim();
         if (text.startsWith("\uFEFF")) {
             text = text.substring(1);
         }
@@ -363,17 +437,22 @@ public final class BookmarkStore {
         } else {
             array = new JSONArray(text);
         }
+        if (array.length() > maxBookmarks) {
+            throw new JSONException("ブックマーク件数が上限を超えています");
+        }
         List<Bookmark> out = new ArrayList<>(array.length());
         for (int i = 0; i < array.length(); i++) {
             JSONObject obj = array.optJSONObject(i);
             if (obj == null) {
                 continue;
             }
-            String url = obj.optString("url", "").trim();
-            if (url.isEmpty()) {
+            String url = sanitizeBookmarkUrl(obj.optString("url", ""));
+            if (url == null) {
                 continue;
             }
-            out.add(new Bookmark(obj.optString("title", ""), url, obj.optString("folder", "")));
+            String title = sanitizeBookmarkTitle(obj.optString("title", ""));
+            String folder = cleanFolderName(obj.optString("folder", ""));
+            out.add(new Bookmark(title, url, folder));
         }
         return out;
     }
@@ -409,7 +488,7 @@ public final class BookmarkStore {
 
     public static List<Bookmark> parseNetscapeHtml(String html) {
         List<Bookmark> out = new ArrayList<>();
-        if (html == null) {
+        if (html == null || html.length() > MAX_IMPORT_CHARS) {
             return out;
         }
         List<String> stack = new ArrayList<>();
@@ -421,11 +500,11 @@ public final class BookmarkStore {
             if (m.group(1) != null) {
                 pending = decodeEntities(stripTags(m.group(1))).trim();
             } else if (m.group(2) != null) {
-                String url = decodeEntities(m.group(2)).trim();
-                if (url.isEmpty() || url.regionMatches(true, 0, "javascript:", 0, 11) || url.regionMatches(true, 0, "place:", 0, 6)) {
+                String url = sanitizeBookmarkUrl(decodeEntities(m.group(2)).trim());
+                if (url == null) {
                     continue;
                 }
-                String title = decodeEntities(stripTags(m.group(3))).trim();
+                String title = sanitizeBookmarkTitle(decodeEntities(stripTags(m.group(3))));
                 String folder = "";
                 for (int i = stack.size() - 1; i >= 0; i--) {
                     if (!stack.get(i).isEmpty()) {
@@ -434,6 +513,9 @@ public final class BookmarkStore {
                     }
                 }
                 out.add(new Bookmark(title, url, folder));
+                if (out.size() > MAX_IMPORT_BOOKMARKS) {
+                    break;
+                }
             } else if (upper.startsWith("</D")) {
                 if (!stack.isEmpty()) {
                     stack.remove(stack.size() - 1);
@@ -443,7 +525,9 @@ public final class BookmarkStore {
                 if (ROOT_FOLDERS.contains(name.toLowerCase(Locale.ROOT))) {
                     name = "";
                 }
-                stack.add(name);
+                if (stack.size() < 128) {
+                    stack.add(cleanFolderName(name));
+                }
                 pending = null;
             }
         }

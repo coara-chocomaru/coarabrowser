@@ -136,19 +136,17 @@ public final class BookmarkDialog {
             .setTitle("ブックマークの編集")
             .setView(editView)
             .setPositiveButton("保存", (d, which) -> {
-                String newUrl = etUrl.getText().toString().trim();
-                if (newUrl.isEmpty()) {
-                    Toast.makeText(activity, "URLを入力してください", Toast.LENGTH_SHORT).show();
+                String newUrl = BookmarkStore.sanitizeBookmarkUrl(
+                    BrowserUrlRouter.normalizeUserInput(etUrl.getText().toString().trim()));
+                if (newUrl == null) {
+                    Toast.makeText(activity, "HTTPまたはHTTPSのURLを入力してください", Toast.LENGTH_SHORT).show();
                     return;
-                }
-                if (!newUrl.contains("://") && !newUrl.startsWith("about:") && !newUrl.startsWith("file:")) {
-                    newUrl = "http://" + newUrl;
                 }
                 int pos = BookmarkStore.indexOfInstance(bookmarks, current);
                 if (pos < 0) {
                     return;
                 }
-                String newTitle = etTitle.getText().toString().trim();
+                String newTitle = BookmarkStore.sanitizeBookmarkTitle(etTitle.getText().toString());
                 String newFolder = BookmarkStore.cleanFolderName(etFolder.getText().toString());
                 bookmarks.set(pos, current.with(newTitle, newUrl, newFolder));
                 host.changed();
