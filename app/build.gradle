@@ -25,18 +25,19 @@ android {
         coreLibraryDesugaringEnabled = true
     }
     
-    def releaseKeystorePath = System.getenv('RELEASE_KEYSTORE_PATH')
-    def releaseKeystorePassword = System.getenv('RELEASE_KEYSTORE_PASSWORD')
-    def releaseKeyAlias = System.getenv('RELEASE_KEY_ALIAS')
-    def releaseKeyPassword = System.getenv('RELEASE_KEY_PASSWORD')
-
-    if (releaseKeystorePath && releaseKeystorePassword && releaseKeyAlias && releaseKeyPassword) {
-        signingConfigs {
-            release {
+    signingConfigs {
+        release {
+            def releaseKeystorePath = System.getenv('RELEASE_KEYSTORE_PATH')
+            if (releaseKeystorePath) {
                 storeFile file(releaseKeystorePath)
-                storePassword releaseKeystorePassword
-                keyAlias releaseKeyAlias
-                keyPassword releaseKeyPassword
+                storePassword System.getenv('RELEASE_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('RELEASE_KEY_ALIAS')
+                keyPassword System.getenv('RELEASE_KEY_PASSWORD')
+            } else {
+                storeFile file('test.jks')
+                storePassword 'test1234'
+                keyAlias 'key0'
+                keyPassword 'test1234'
             }
         }
     }
@@ -49,9 +50,7 @@ android {
             minifyEnabled = true
             shrinkResources = true
             debuggable = false
-            if (releaseKeystorePath && releaseKeystorePassword && releaseKeyAlias && releaseKeyPassword) {
-                signingConfig = signingConfigs.release
-            }
+            signingConfig = signingConfigs.release
         }
     }
 
