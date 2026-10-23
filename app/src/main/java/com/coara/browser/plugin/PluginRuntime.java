@@ -37,6 +37,9 @@ public final class PluginRuntime {
     private static final String WATCHDOG_ASSET = "plugin_watchdog.js";
 
     private static final int MAX_COMMANDS = 32;
+    private static final int MAX_PAGE_SCRIPT_ENTRIES = 256;
+    private static final int MAX_PAGE_SCRIPT_CHARS = 8 * 1024 * 1024;
+    private static final int MAX_WATCHDOG_SCRIPT_CHARS = 2 * 1024 * 1024;
 
     private static String runtimeTemplate;
     private static String watchdogTemplate;
@@ -60,6 +63,20 @@ public final class PluginRuntime {
             this.pluginTitle = pluginTitle;
             this.commandId = commandId;
             this.title = title;
+        }
+    }
+
+    private static final class ScheduledScript {
+        final PluginInfo info;
+        final PluginEntry entry;
+        final int index;
+        final String source;
+
+        ScheduledScript(PluginInfo info, PluginEntry entry, int index, String source) {
+            this.info = info;
+            this.entry = entry;
+            this.index = index;
+            this.source = source;
         }
     }
 
@@ -345,13 +362,32 @@ public final class PluginRuntime {
             }
             state.injectedForNavigation = true;
             final long generation = state.navigationGeneration;
+            int scriptCount = 0;
+            long scriptChars = 0L;
+            boolean limitReached = false;
+            outer:
             for (final PluginInfo info : enabled) {
-                if (!info.isTarget(url)) {
-                    continue;
-                }
-                List<String> scripts = buildPluginScripts(manager, info, url);
-                final String id = info.id;
-                for (String js : scripts) {
+                List<PluginEntry> entries = info.entries();
+                for (int i = 0; i < entries.size(); i++) {
+                    PluginEntry entry = entries.get(i);
+                    if (!entry.isTarget(url) || !entry.hasContent()) {
+                        continue;
+                    }
+                    if (scriptCount >= MAX_PAGE_SCRIPT_ENTRIES) {
+                        limitReached = true;
+                        break outer;
+                    }
+                    String js = buildEntryScript(manager, info, entry, i);
+                    if (js == null) {
+                        continue;
+                    }
+                    if (scriptChars + js.length() > MAX_PAGE_SCRIPT_CHARS) {
+                        limitReached = true;
+                        break outer;
+                    }
+                    scriptCount++;
+                    scriptChars += js.length();
+                    final String id = info.id;
                     view.evaluateJavascript(js, new ValueCallback<String>() {
                         @Override
                         public void onReceiveValue(String value) {
@@ -370,6 +406,9 @@ public final class PluginRuntime {
                         }
                     });
                 }
+            }
+            if (limitReached) {
+                manager.log("W", "-", "このページのプラグイン実行量が上限に達したため、残りのスクリプトを省略しました");
             }
         } catch (Throwable t) {
             logFailure(view.getContext(), "injectFallback", t);
@@ -393,28 +432,54 @@ public final class PluginRuntime {
         if (enabled.isEmpty()) {
             return;
         }
+        List<ScheduledScript> scheduled = new ArrayList<>();
+        long totalChars = 0L;
+        boolean limitReached = false;
+        outer:
+        for (PluginInfo info : enabled) {
+            List<PluginEntry> entries = info.entries();
+            for (int i = 0; i < entries.size(); i++) {
+                PluginEntry entry = entries.get(i);
+                if (!entry.hasContent()) {
+                    continue;
+                }
+                if (scheduled.size() >= MAX_PAGE_SCRIPT_ENTRIES) {
+                    limitReached = true;
+                    break outer;
+                }
+                String js = buildEntryScript(manager, info, entry, i);
+                if (js == null) {
+                    continue;
+                }
+                if (totalChars + js.length() > MAX_PAGE_SCRIPT_CHARS) {
+                    limitReached = true;
+                    break outer;
+                }
+                scheduled.add(new ScheduledScript(info, entry, i, js));
+                totalChars += js.length();
+            }
+        }
+        if (limitReached) {
+            manager.log("W", "-", "ドキュメント開始スクリプトが実行量上限に達したため、残りのスクリプトを省略しました");
+        }
+        if (scheduled.isEmpty()) {
+            return;
+        }
         try {
             Set<String> watchdogOrigins = new LinkedHashSet<>();
-            for (PluginInfo info : enabled) {
-                for (PluginEntry entry : info.entries()) {
-                    watchdogOrigins.addAll(PluginPatterns.toAllowedOriginRules(PluginPatterns.effectiveMatches(entry.matches)));
-                }
+            for (ScheduledScript item : scheduled) {
+                watchdogOrigins.addAll(PluginPatterns.toAllowedOriginRules(
+                        PluginPatterns.effectiveMatches(item.entry.matches)));
             }
-            String watchdog = buildWatchdogScript(manager, enabled);
+            String watchdog = buildWatchdogScript(manager, scheduled);
             if (watchdog != null) {
-                state.handlers.add(WebViewCompat.addDocumentStartJavaScript(view, watchdog, watchdogOrigins.isEmpty() ? Collections.singleton("*") : watchdogOrigins));
+                Set<String> origins = watchdogOrigins.isEmpty() ? Collections.singleton("*") : watchdogOrigins;
+                state.handlers.add(WebViewCompat.addDocumentStartJavaScript(view, watchdog, origins));
             }
-            for (PluginInfo info : enabled) {
-                List<PluginEntry> entries = info.entries();
-                for (int i = 0; i < entries.size(); i++) {
-                    PluginEntry entry = entries.get(i);
-                    String js = buildEntryScript(manager, info, entry, i);
-                    if (js == null) {
-                        continue;
-                    }
-                    Set<String> origins = PluginPatterns.toAllowedOriginRules(PluginPatterns.effectiveMatches(entry.matches));
-                    state.handlers.add(WebViewCompat.addDocumentStartJavaScript(view, js, origins));
-                }
+            for (ScheduledScript item : scheduled) {
+                Set<String> origins = PluginPatterns.toAllowedOriginRules(
+                        PluginPatterns.effectiveMatches(item.entry.matches));
+                state.handlers.add(WebViewCompat.addDocumentStartJavaScript(view, item.source, origins));
             }
             state.startScriptsActive = true;
         } catch (Throwable t) {
@@ -434,33 +499,27 @@ public final class PluginRuntime {
         state.handlers.clear();
     }
 
-    private static String buildWatchdogScript(PluginManager manager, List<PluginInfo> enabled) throws Exception {
+    private static String buildWatchdogScript(PluginManager manager, List<ScheduledScript> scheduled) throws Exception {
         String template = loadTemplate(manager.context(), WATCHDOG_ASSET, true);
         if (template == null) {
             return null;
         }
         JSONArray expected = new JSONArray();
-        for (PluginInfo p : enabled) {
-            List<PluginEntry> entries = p.entries();
-            for (int i = 0; i < entries.size(); i++) {
-                PluginEntry e = entries.get(i);
-                if (!e.hasContent()) {
-                    continue;
-                }
-                JSONObject o = new JSONObject();
-                o.put("id", p.id);
-                o.put("key", manager.keyFor(p.id + "#" + i));
-                o.put("allFrames", e.allFrames);
-                o.put("matches", new JSONArray(PluginPatterns.toRegexList(PluginPatterns.effectiveMatches(e.matches))));
-                o.put("excludes", new JSONArray(PluginPatterns.toRegexList(e.excludes)));
-                expected.put(o);
-            }
+        for (ScheduledScript item : scheduled) {
+            JSONObject o = new JSONObject();
+            o.put("id", item.info.id);
+            o.put("key", manager.keyFor(item.info.id + "#" + item.index));
+            o.put("allFrames", item.entry.allFrames);
+            o.put("matches", new JSONArray(PluginPatterns.toRegexList(PluginPatterns.effectiveMatches(item.entry.matches))));
+            o.put("excludes", new JSONArray(PluginPatterns.toRegexList(item.entry.excludes)));
+            expected.put(o);
         }
         List<String[]> values = new ArrayList<>();
         values.add(new String[]{"%BRIDGE%", PluginManager.BRIDGE_NAME});
         values.add(new String[]{"%TOKEN%", manager.getToken()});
         values.add(new String[]{"%EXPECTED%", expected.toString()});
-        return fill(template, values);
+        String script = fill(template, values);
+        return script.length() <= MAX_WATCHDOG_SCRIPT_CHARS ? script : null;
     }
 
     static List<String> buildPluginScripts(PluginManager manager, PluginInfo info, String url) {

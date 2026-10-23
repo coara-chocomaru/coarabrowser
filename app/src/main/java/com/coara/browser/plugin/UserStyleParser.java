@@ -23,6 +23,9 @@ public final class UserStyleParser {
     }
 
     private static final int MAX_BLOCKS = 32;
+    private static final int MAX_META_BLOCK_CHARS = 65536;
+    private static final int MAX_META_VALUE_CHARS = 2048;
+    private static final int MAX_VARIABLES = 128;
 
     private UserStyleParser() {
     }
@@ -39,14 +42,19 @@ public final class UserStyleParser {
         if (a >= 0) {
             int b = src.indexOf("==/UserStyle==", a);
             if (b > a) {
-                String meta = src.substring(a + "==UserStyle==".length(), b);
-                parseMeta(meta, r, vars, warnings);
-                int commentStart = src.lastIndexOf("/*", a);
-                int commentEnd = src.indexOf("*/", b);
-                if (commentStart >= 0 && commentEnd > b) {
-                    body = src.substring(0, commentStart) + src.substring(commentEnd + 2);
-                } else {
+                if (b - a > MAX_META_BLOCK_CHARS) {
+                    warnings.add("スタイルのメタデータが大きすぎるため無視しました");
                     body = src.substring(b + "==/UserStyle==".length());
+                } else {
+                    String meta = src.substring(a + "==UserStyle==".length(), b);
+                    parseMeta(meta, r, vars, warnings);
+                    int commentStart = src.lastIndexOf("/*", a);
+                    int commentEnd = src.indexOf("*/", b);
+                    if (commentStart >= 0 && commentEnd > b) {
+                        body = src.substring(0, commentStart) + src.substring(commentEnd + 2);
+                    } else {
+                        body = src.substring(b + "==/UserStyle==".length());
+                    }
                 }
             }
         }
@@ -56,6 +64,10 @@ public final class UserStyleParser {
         int i = 0;
         int n = body.length();
         while (i < n) {
+            if (blocks.size() >= MAX_BLOCKS) {
+                warnings.add("スタイルブロックが多すぎるため" + MAX_BLOCKS + "件までに制限しました");
+                break;
+            }
             int at = indexOfDocument(body, i);
             if (at < 0) {
                 outside.append(body, i, n);
@@ -163,6 +175,7 @@ public final class UserStyleParser {
             }
             String key = line.substring(1, sp).toLowerCase(java.util.Locale.US);
             String value = line.substring(sp).trim();
+            if (value.length() > MAX_META_VALUE_CHARS) continue;
             switch (key) {
                 case "name":
                     r.name = value;
@@ -204,6 +217,7 @@ public final class UserStyleParser {
         }
         String type = tokens.get(0).toLowerCase(java.util.Locale.US);
         String name = tokens.get(1);
+        if (name.length() > 128 || (!vars.containsKey(name) && vars.size() >= MAX_VARIABLES)) return;
         if (type.equals("select") || type.equals("dropdown") || type.equals("image")) {
             String first = null;
             String starred = null;

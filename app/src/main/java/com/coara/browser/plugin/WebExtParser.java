@@ -20,6 +20,16 @@ public final class WebExtParser {
             "storage", "unlimitedstorage", "activetab", "clipboardwrite", "notifications", "tabs",
             "clipboardread", "geolocation", "idle", "scripting", "webnavigation"));
     private static final int MAX_GLOB_COMBINATIONS = 64;
+    private static final int MAX_CONTENT_SCRIPT_ENTRIES = 64;
+    private static final int MAX_MATCHES_PER_ENTRY = 128;
+    private static final int MAX_STRING_ENTRIES = 128;
+    private static final int MAX_METADATA_STRING_CHARS = 2048;
+    private static final int MAX_TOTAL_SCRIPT_REFERENCES = 256;
+    private static final int MAX_TOTAL_STYLE_REFERENCES = 256;
+    private static final int MAX_TOTAL_MATCH_PATTERNS = 512;
+    private static final int MAX_JSON_CHARS = 1024 * 1024;
+    private static final int MAX_JSON_DEPTH = 64;
+    private static final int MAX_JSON_ELEMENTS = 16384;
 
     private WebExtParser() {
     }
@@ -29,11 +39,48 @@ public final class WebExtParser {
             return false;
         }
         try {
-            JSONObject o = new JSONObject(decode(data));
+            JSONObject o = parseBoundedObject(decode(data));
             return o.has("manifest_version") || o.has("content_scripts");
         } catch (Exception e) {
             return false;
         }
+    }
+
+    private static JSONObject parseBoundedObject(String raw) throws Exception {
+        if (raw == null || raw.length() > MAX_JSON_CHARS || !safeJsonStructure(raw)) {
+            throw new IllegalArgumentException("JSON size or structure limit exceeded");
+        }
+        return new JSONObject(raw);
+    }
+
+    private static boolean safeJsonStructure(String raw) {
+        boolean inString = false;
+        boolean escaped = false;
+        int depth = 0;
+        int elements = 0;
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                } else if (c == '\\') {
+                    escaped = true;
+                } else if (c == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (c == '"') {
+                inString = true;
+            } else if (c == '{' || c == '[') {
+                if (++depth > MAX_JSON_DEPTH || ++elements > MAX_JSON_ELEMENTS) return false;
+            } else if (c == '}' || c == ']') {
+                if (--depth < 0 || ++elements > MAX_JSON_ELEMENTS) return false;
+            } else if (c == ',' || c == ':') {
+                if (++elements > MAX_JSON_ELEMENTS) return false;
+            }
+        }
+        return !inString && depth == 0;
     }
 
     static String decode(byte[] data) {
@@ -48,7 +95,7 @@ public final class WebExtParser {
             throws PluginInstallException {
         JSONObject m;
         try {
-            m = new JSONObject(decode(files.get("manifest.json")));
+            m = parseBoundedObject(decode(files.get("manifest.json")));
         } catch (Exception e) {
             throw new PluginInstallException("manifest.jsonを解析できません: " + e.getMessage());
         }
@@ -56,17 +103,17 @@ public final class WebExtParser {
         info.defaultLocale = m.optString("default_locale", "");
         Messages msgs = Messages.load(files, info.defaultLocale);
 
-        info.title = PluginInstaller.cleanText(msgs.resolve(m.optString("name", "")));
-        info.version = PluginInstaller.cleanText(m.optString("version", ""));
-        info.description = PluginInstaller.cleanText(msgs.resolve(m.optString("description", "")));
-        info.homepage = PluginInstaller.cleanText(m.optString("homepage_url", ""));
+        info.title = PluginInstaller.cleanText(boundedMetadata(msgs.resolve(m.optString("name", ""))));
+        info.version = PluginInstaller.cleanText(boundedMetadata(m.optString("version", "")));
+        info.description = PluginInstaller.cleanText(boundedMetadata(msgs.resolve(m.optString("description", ""))));
+        info.homepage = PluginInstaller.cleanText(boundedMetadata(m.optString("homepage_url", "")));
         Object authorObj = m.opt("author");
         if (authorObj instanceof String) {
-            info.author = PluginInstaller.cleanText(msgs.resolve((String) authorObj));
+            info.author = PluginInstaller.cleanText(boundedMetadata(msgs.resolve((String) authorObj)));
         } else {
             JSONObject dev = m.optJSONObject("developer");
             if (dev != null) {
-                info.author = PluginInstaller.cleanText(dev.optString("name", ""));
+                info.author = PluginInstaller.cleanText(boundedMetadata(dev.optString("name", "")));
             }
         }
         String geckoId = geckoId(m);
@@ -76,16 +123,21 @@ public final class WebExtParser {
         warnUnsupported(m, warnings);
 
         JSONArray cs = m.optJSONArray("content_scripts");
+        ParseLimits limits = new ParseLimits();
         if (cs != null) {
-            for (int i = 0; i < cs.length(); i++) {
+            int count = Math.min(cs.length(), MAX_CONTENT_SCRIPT_ENTRIES);
+            for (int i = 0; i < count; i++) {
                 JSONObject c = cs.optJSONObject(i);
                 if (c == null) {
                     continue;
                 }
-                PluginEntry e = buildEntry(c, files, warnings, i);
+                PluginEntry e = buildEntry(c, files, warnings, limits, i);
                 if (e != null) {
                     info.entries.add(e);
                 }
+            }
+            if (cs.length() > MAX_CONTENT_SCRIPT_ENTRIES) {
+                warnings.add("content_scriptsが多すぎるため" + MAX_CONTENT_SCRIPT_ENTRIES + "件までに制限しました");
             }
         }
         if (info.entries.isEmpty()) {
@@ -122,7 +174,7 @@ public final class WebExtParser {
             JSONObject g = o.optJSONObject("gecko");
             if (g != null) {
                 String id = g.optString("id", "");
-                if (!id.isEmpty()) {
+                if (!id.isEmpty() && id.length() <= MAX_METADATA_STRING_CHARS) {
                     return id;
                 }
             }
@@ -137,9 +189,9 @@ public final class WebExtParser {
             if (a == null) {
                 continue;
             }
-            for (int i = 0; i < a.length(); i++) {
+            for (int i = 0; i < a.length() && i < MAX_STRING_ENTRIES; i++) {
                 Object o = a.opt(i);
-                if (o instanceof String) {
+                if (o instanceof String && ((String) o).length() <= MAX_METADATA_STRING_CHARS) {
                     declared.add((String) o);
                 }
             }
@@ -196,18 +248,35 @@ public final class WebExtParser {
         }
     }
 
-    private static PluginEntry buildEntry(JSONObject c, Map<String, byte[]> files, List<String> warnings, int index) {
+    private static final class ParseLimits {
+        int matchPatterns;
+        int scriptReferences;
+        int styleReferences;
+        boolean patternWarning;
+    }
+
+    private static String boundedMetadata(String value) {
+        if (value == null) return "";
+        return value.length() <= MAX_METADATA_STRING_CHARS ? value : value.substring(0, MAX_METADATA_STRING_CHARS);
+    }
+
+    private static PluginEntry buildEntry(JSONObject c, Map<String, byte[]> files, List<String> warnings,
+                                          ParseLimits limits, int index) {
         PluginEntry e = new PluginEntry();
         e.runAt = PluginInfo.normalizeRunAt(c.optString("run_at", PluginInfo.RUN_AT_END));
         e.allFrames = c.optBoolean("all_frames", false);
         List<String> baseMatches = new ArrayList<>();
         JSONArray ma = c.optJSONArray("matches");
         if (ma != null) {
-            for (int i = 0; i < ma.length(); i++) {
+            for (int i = 0; i < ma.length() && i < MAX_MATCHES_PER_ENTRY; i++) {
                 String raw = ma.optString(i, "");
+                if (raw.length() > MAX_METADATA_STRING_CHARS) {
+                    warnings.add("matchesの長すぎる値を無視しました(#" + (index + 1) + ")");
+                    continue;
+                }
                 String r = PluginPatterns.fromMatchPattern(raw);
                 if (r == null) {
-                    warnings.add("無効なmatchesを無視(#" + (index + 1) + "): " + raw);
+                    warnings.add("無効なmatchesを無視(#" + (index + 1) + "): " + boundedMetadata(raw));
                 } else {
                     baseMatches.add(r);
                 }
@@ -219,50 +288,71 @@ public final class WebExtParser {
         }
         List<String> includeGlobs = readStrings(c.optJSONArray("include_globs"));
         if (includeGlobs.isEmpty()) {
-            e.matches.addAll(baseMatches);
-        } else if (baseMatches.size() * includeGlobs.size() > MAX_GLOB_COMBINATIONS) {
+            addPatterns(e.matches, baseMatches, limits, warnings);
+        } else if ((long) baseMatches.size() * includeGlobs.size() > MAX_GLOB_COMBINATIONS) {
             warnings.add("include_globsの組合せが多すぎるため無視しました(#" + (index + 1) + ")");
-            e.matches.addAll(baseMatches);
+            addPatterns(e.matches, baseMatches, limits, warnings);
         } else {
             for (String bm : baseMatches) {
                 for (String g : includeGlobs) {
+                    if (limits.matchPatterns >= MAX_TOTAL_MATCH_PATTERNS) break;
                     String gr = PluginPatterns.toRegex(g);
                     String inter = gr == null ? null : PluginPatterns.intersect(bm, "/" + gr + "/");
-                    if (inter != null) {
+                    if (inter != null && !e.matches.contains(inter)) {
                         e.matches.add(inter);
+                        limits.matchPatterns++;
                     }
                 }
+                if (limits.matchPatterns >= MAX_TOTAL_MATCH_PATTERNS) break;
             }
             if (e.matches.isEmpty()) {
-                e.matches.addAll(baseMatches);
+                addPatterns(e.matches, baseMatches, limits, warnings);
             }
+        }
+        if (e.matches.isEmpty()) {
+            if (!limits.patternWarning) {
+                warnings.add("matchesの合計数が上限に達したため後続の設定を制限しました");
+                limits.patternWarning = true;
+            }
+            return null;
         }
         JSONArray ex = c.optJSONArray("exclude_matches");
         if (ex != null) {
-            for (int i = 0; i < ex.length(); i++) {
+            for (int i = 0; i < ex.length() && i < MAX_MATCHES_PER_ENTRY; i++) {
                 String r = PluginPatterns.fromMatchPattern(ex.optString(i, ""));
-                if (r != null) {
+                if (r != null && limits.matchPatterns < MAX_TOTAL_MATCH_PATTERNS && !e.excludes.contains(r)) {
                     e.excludes.add(r);
+                    limits.matchPatterns++;
                 }
             }
         }
         for (String g : readStrings(c.optJSONArray("exclude_globs"))) {
-            if (PluginPatterns.toRegex(g) != null) {
+            if (PluginPatterns.toRegex(g) != null && limits.matchPatterns < MAX_TOTAL_MATCH_PATTERNS
+                    && !e.excludes.contains(g)) {
                 e.excludes.add(g);
+                limits.matchPatterns++;
             }
         }
         for (String js : readStrings(c.optJSONArray("js"))) {
+            if (limits.scriptReferences >= MAX_TOTAL_SCRIPT_REFERENCES) break;
             String p = PluginInstaller.refPath(js);
             if (p != null && files.containsKey(p)) {
-                e.scripts.add(p);
+                if (!e.scripts.contains(p)) {
+                    e.scripts.add(p);
+                    limits.scriptReferences++;
+                }
             } else {
                 warnings.add("jsが見つかりません: " + js);
             }
         }
         for (String css : readStrings(c.optJSONArray("css"))) {
+            if (limits.styleReferences >= MAX_TOTAL_STYLE_REFERENCES) break;
             String p = PluginInstaller.refPath(css);
             if (p != null && files.containsKey(p)) {
-                e.styles.add(p);
+                if (!e.styles.contains(p)) {
+                    e.styles.add(p);
+                    limits.styleReferences++;
+                }
             } else {
                 warnings.add("cssが見つかりません: " + css);
             }
@@ -274,15 +364,32 @@ public final class WebExtParser {
         return e;
     }
 
+    private static void addPatterns(List<String> target, List<String> values, ParseLimits limits,
+                                    List<String> warnings) {
+        for (String value : values) {
+            if (limits.matchPatterns >= MAX_TOTAL_MATCH_PATTERNS) {
+                if (!limits.patternWarning) {
+                    warnings.add("matchesの合計数が上限に達したため後続の設定を制限しました");
+                    limits.patternWarning = true;
+                }
+                break;
+            }
+            if (!target.contains(value)) {
+                target.add(value);
+                limits.matchPatterns++;
+            }
+        }
+    }
+
     private static List<String> readStrings(JSONArray a) {
         List<String> out = new ArrayList<>();
         if (a == null) {
             return out;
         }
-        for (int i = 0; i < a.length(); i++) {
-            String s = a.optString(i, "");
-            if (!s.isEmpty()) {
-                out.add(s);
+        for (int i = 0; i < a.length() && out.size() < MAX_STRING_ENTRIES; i++) {
+            String value = a.optString(i, "");
+            if (!value.isEmpty() && value.length() <= MAX_METADATA_STRING_CHARS) {
+                out.add(value);
             }
         }
         return out;
@@ -307,13 +414,15 @@ public final class WebExtParser {
     }
 
     private static void collectIcons(Object o, List<String> out) {
+        if (out.size() >= MAX_STRING_ENTRIES) return;
         if (o instanceof String) {
-            out.add((String) o);
+            String icon = (String) o;
+            if (!icon.isEmpty() && icon.length() <= MAX_METADATA_STRING_CHARS) out.add(icon);
         } else if (o instanceof JSONObject) {
             JSONObject j = (JSONObject) o;
             List<Integer> sizes = new ArrayList<>();
             java.util.Iterator<String> it = j.keys();
-            while (it.hasNext()) {
+            while (it.hasNext() && sizes.size() < MAX_STRING_ENTRIES) {
                 try {
                     sizes.add(Integer.parseInt(it.next()));
                 } catch (NumberFormatException ignored) {
@@ -327,11 +436,10 @@ public final class WebExtParser {
                 }
             }
             usable.addAll(sizes);
-            for (int s : usable) {
-                String v = j.optString(String.valueOf(s), "");
-                if (!v.isEmpty()) {
-                    out.add(v);
-                }
+            for (int size : usable) {
+                if (out.size() >= MAX_STRING_ENTRIES) break;
+                String v = j.optString(String.valueOf(size), "");
+                if (!v.isEmpty() && v.length() <= MAX_METADATA_STRING_CHARS) out.add(v);
             }
         }
     }
@@ -359,7 +467,7 @@ public final class WebExtParser {
             JSONObject data = new JSONObject();
             if (chosen != null) {
                 try {
-                    data = new JSONObject(decode(files.get("_locales/" + chosen + "/messages.json")));
+                    data = parseBoundedObject(decode(files.get("_locales/" + chosen + "/messages.json")));
                 } catch (Exception ignored) {
                 }
             }
@@ -368,7 +476,7 @@ public final class WebExtParser {
 
         public static Messages of(String json, String extensionId) {
             try {
-                return new Messages(new JSONObject(json), extensionId);
+                return new Messages(parseBoundedObject(json), extensionId);
             } catch (Exception e) {
                 return new Messages(new JSONObject(), extensionId);
             }

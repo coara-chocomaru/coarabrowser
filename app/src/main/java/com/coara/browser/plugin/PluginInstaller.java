@@ -37,38 +37,107 @@ public final class PluginInstaller {
     }
 
     public static final class HttpFetcher implements Fetcher {
+        private static final int MAX_REDIRECTS = 5;
+
         @Override
         public byte[] fetch(String url, int maxBytes) throws IOException {
-            String lower = url.toLowerCase(Locale.US);
-            if (!lower.startsWith("http://") && !lower.startsWith("https://")) {
-                throw new IOException("unsupported scheme");
+            String current = url;
+            URL initial = new URL(url);
+            validateFetchUrl(initial);
+            if (resolvesPrivateOrLocal(initial.getHost())) {
+                throw new IOException("private host blocked");
             }
-            HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-            try {
-                c.setConnectTimeout(8000);
-                c.setReadTimeout(15000);
-                c.setInstanceFollowRedirects(true);
-                c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10) CoaraBrowser");
-                int code = c.getResponseCode();
-                if (code < 200 || code >= 300) {
-                    throw new IOException("HTTP " + code);
-                }
-                try (InputStream in = c.getInputStream()) {
-                    ByteArrayOutputStream bos = new ByteArrayOutputStream();
-                    byte[] buf = new byte[8192];
-                    int n;
-                    long total = 0L;
-                    while ((n = in.read(buf)) > 0) {
-                        total += n;
-                        if (total > maxBytes) {
-                            throw new IOException("too large");
-                        }
-                        bos.write(buf, 0, n);
+            for (int redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
+                URL target = new URL(current);
+                validateFetchUrl(target);
+                if (redirects > 0) {
+                    if (initial.getProtocol().equalsIgnoreCase("https") && !target.getProtocol().equalsIgnoreCase("https")) {
+                        throw new IOException("HTTPS downgrade blocked");
                     }
-                    return bos.toByteArray();
+                    if (resolvesPrivateOrLocal(target.getHost())) {
+                        throw new IOException("private redirect blocked");
+                    }
                 }
-            } finally {
-                c.disconnect();
+                HttpURLConnection c = (HttpURLConnection) target.openConnection();
+                try {
+                    c.setConnectTimeout(8000);
+                    c.setReadTimeout(15000);
+                    c.setInstanceFollowRedirects(false);
+                    c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10) CoaraBrowser");
+                    int code = c.getResponseCode();
+                    if (code >= 300 && code < 400) {
+                        String location = c.getHeaderField("Location");
+                        if (location == null || location.isEmpty() || redirects >= MAX_REDIRECTS) {
+                            throw new IOException("invalid redirect");
+                        }
+                        current = new URL(target, location).toExternalForm();
+                        continue;
+                    }
+                    if (code < 200 || code >= 300) {
+                        throw new IOException("HTTP " + code);
+                    }
+                    try (InputStream in = c.getInputStream()) {
+                        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                        byte[] buf = new byte[8192];
+                        int n;
+                        long total = 0L;
+                        while ((n = in.read(buf)) > 0) {
+                            total += n;
+                            if (total > maxBytes) {
+                                throw new IOException("too large");
+                            }
+                            bos.write(buf, 0, n);
+                        }
+                        return bos.toByteArray();
+                    }
+                } finally {
+                    c.disconnect();
+                }
+            }
+            throw new IOException("too many redirects");
+        }
+
+        private static void validateFetchUrl(URL url) throws IOException {
+            String protocol = url.getProtocol();
+            if (!("http".equalsIgnoreCase(protocol) || "https".equalsIgnoreCase(protocol))
+                    || url.getHost() == null || url.getHost().isEmpty() || url.getUserInfo() != null) {
+                throw new IOException("unsupported URL");
+            }
+        }
+
+        private static boolean resolvesPrivateOrLocal(String host) {
+            if (host == null || host.isEmpty()) {
+                return true;
+            }
+            String h = host.toLowerCase(Locale.US);
+            while (h.endsWith(".")) h = h.substring(0, h.length() - 1);
+            if (h.startsWith("[") && h.endsWith("]")) h = h.substring(1, h.length() - 1);
+            if (h.equals("localhost") || h.endsWith(".localhost") || h.endsWith(".local")
+                    || h.endsWith(".internal") || h.endsWith(".lan") || h.equals("::1")
+                    || h.startsWith("127.") || h.startsWith("10.") || h.startsWith("192.168.")) {
+                return true;
+            }
+            String[] parts = h.split("\\.");
+            if (parts.length == 4) {
+                try {
+                    int a = Integer.parseInt(parts[0]);
+                    int b = Integer.parseInt(parts[1]);
+                    if (a == 0 || a == 10 || a == 127 || a >= 224 || a == 169 && b == 254
+                            || a == 172 && b >= 16 && b <= 31 || a == 192 && b == 168
+                            || a == 100 && b >= 64 && b <= 127) return true;
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            try {
+                for (java.net.InetAddress address : java.net.InetAddress.getAllByName(h)) {
+                    if (address.isAnyLocalAddress() || address.isLoopbackAddress() || address.isLinkLocalAddress()
+                            || address.isSiteLocalAddress() || address.isMulticastAddress()) return true;
+                    byte[] bytes = address.getAddress();
+                    if (bytes.length == 16 && (bytes[0] & 0xFE) == 0xFC) return true;
+                }
+                return false;
+            } catch (Exception e) {
+                return true;
             }
         }
     }
@@ -638,14 +707,17 @@ public final class PluginInstaller {
                     throw new PluginInstallException("zip内のファイル数が多すぎます(上限" + MAX_ENTRIES + ")");
                 }
                 if (entry.isDirectory()) {
+                    total += discardLimited(zin, MAX_TOTAL_BYTES - total, "zipの展開後サイズが上限を超えています");
                     continue;
                 }
                 String norm = entry.getName() == null ? "" : entry.getName().replace('\\', '/');
                 if (norm.startsWith("__MACOSX/") || norm.contains("/__MACOSX/")) {
+                    total += discardLimited(zin, MAX_TOTAL_BYTES - total, "zipの展開後サイズが上限を超えています");
                     continue;
                 }
                 String path = sanitizePath(norm);
                 if (path == null) {
+                    total += discardLimited(zin, MAX_TOTAL_BYTES - total, "zipの展開後サイズが上限を超えています");
                     continue;
                 }
                 String ext = extOf(path);
@@ -655,9 +727,10 @@ public final class PluginInstaller {
                 } else if (TEXT_EXT.contains(ext)) {
                     limit = MAX_TEXT_BYTES;
                 } else {
+                    total += discardLimited(zin, MAX_TOTAL_BYTES - total, "zipの展開後サイズが上限を超えています");
                     continue;
                 }
-                byte[] data = readLimited(zin, limit, "ファイルが大きすぎます: " + path);
+                byte[] data = readLimited(zin, Math.min(limit, MAX_TOTAL_BYTES - total), "ファイルが大きすぎます: " + path);
                 total += data.length;
                 if (total > MAX_TOTAL_BYTES) {
                     throw new PluginInstallException("展開後の合計サイズが上限(12MB)を超えています");
@@ -672,6 +745,23 @@ public final class PluginInstaller {
             throw new PluginInstallException("zipを読み込めません: " + e.getMessage());
         }
         return files;
+    }
+
+    private static long discardLimited(InputStream in, long limit, String errorMessage)
+            throws PluginInstallException, IOException {
+        if (limit < 0L) {
+            throw new PluginInstallException(errorMessage);
+        }
+        byte[] buffer = new byte[8192];
+        long total = 0L;
+        int n;
+        while ((n = in.read(buffer)) > 0) {
+            total += n;
+            if (total > limit) {
+                throw new PluginInstallException(errorMessage);
+            }
+        }
+        return total;
     }
 
     private static byte[] readLimited(InputStream in, long limit, String errorMessage)

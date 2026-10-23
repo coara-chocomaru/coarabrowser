@@ -21,6 +21,8 @@ import java.util.Map;
 
 final class PluginHttp {
     static final int MAX_BODY = 8 * 1024 * 1024;
+    private static final int MAX_REQUEST_BODY = 2 * 1024 * 1024;
+    private static final int MAX_RESPONSE_HEADERS = 64 * 1024;
     private static final int MAX_REDIRECTS = 8;
     private static final int DEFAULT_TIMEOUT = 30000;
     private static final int MAX_TIMEOUT = 120000;
@@ -166,7 +168,7 @@ final class PluginHttp {
         }
     }
 
-    static boolean hostAllowed(List<String> connects, String url, String originHost) {
+    static boolean hostAllowed(List<String> connects, String url, String originUrl) {
         String host;
         String scheme;
         try {
@@ -187,9 +189,9 @@ final class PluginHttp {
             host = host.substring(0, host.length() - 1);
         }
         boolean secure = "https".equalsIgnoreCase(scheme);
-        String origin = originHost == null ? "" : originHost.toLowerCase(Locale.US);
+        String origin = originUrl == null ? "" : originUrl;
         boolean priv = isPrivateHost(host);
-        if (host.equals(origin)) {
+        if (sameOrigin(origin, url)) {
             return true;
         }
         if (connects != null) {
@@ -228,6 +230,9 @@ final class PluginHttp {
     static JSONObject execute(JSONObject opts, List<String> connects, Call call) {
         try {
             String url = opts.optString("url", "");
+            if (url.length() > 8192) {
+                return errorPayload("url too long");
+            }
             String origin = opts.optString("origin", "");
             String method = opts.optString("method", "GET").toUpperCase(Locale.US);
             if (!method.matches("[A-Z]{3,10}")) {
@@ -245,9 +250,23 @@ final class PluginHttp {
             JSONObject headers = opts.optJSONObject("headers");
             byte[] body = null;
             if (opts.has("dataB64")) {
-                body = Base64.decode(opts.optString("dataB64", ""), Base64.DEFAULT);
+                String encoded = opts.optString("dataB64", "");
+                if (encoded.length() > ((MAX_REQUEST_BODY + 2L) / 3L) * 4L + 16L) {
+                    return errorPayload("request body too large");
+                }
+                body = Base64.decode(encoded, Base64.DEFAULT);
             } else if (opts.has("data") && !opts.isNull("data")) {
-                body = opts.optString("data", "").getBytes(StandardCharsets.UTF_8);
+                String text = opts.optString("data", "");
+                if (text.length() > MAX_REQUEST_BODY) {
+                    return errorPayload("request body too large");
+                }
+                body = text.getBytes(StandardCharsets.UTF_8);
+            }
+            if (body != null && body.length > MAX_REQUEST_BODY) {
+                return errorPayload("request body too large");
+            }
+            if (headers != null && !validHeaders(headers)) {
+                return errorPayload("invalid headers");
             }
             String responseType = opts.optString("responseType", "");
             String user = opts.optString("user", "");
@@ -276,8 +295,10 @@ final class PluginHttp {
                         while (it.hasNext()) {
                             String k = it.next();
                             String kl = k.toLowerCase(Locale.US);
+                            boolean sameOriginalOrigin = sameOrigin(url, current);
                             if (kl.equals("host") || kl.equals("content-length") || kl.equals("connection")
-                                    || kl.equals("transfer-encoding")) {
+                                    || kl.equals("transfer-encoding") || kl.equals("proxy-authorization")
+                                    || (!sameOriginalOrigin && (kl.equals("authorization") || kl.equals("cookie")))) {
                                 continue;
                             }
                             if (kl.equals("cookie")) {
@@ -298,7 +319,7 @@ final class PluginHttp {
                             c.setRequestProperty("Cookie", cookie);
                         }
                     }
-                    if (!user.isEmpty()) {
+                    if (!user.isEmpty() && sameOrigin(url, current)) {
                         String cred = Base64.encodeToString((user + ":" + password).getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
                         c.setRequestProperty("Authorization", "Basic " + cred);
                     }
@@ -385,6 +406,43 @@ final class PluginHttp {
         }
     }
 
+
+    private static boolean validHeaders(JSONObject headers) {
+        if (headers.length() > 64) {
+            return false;
+        }
+        Iterator<String> it = headers.keys();
+        int total = 0;
+        while (it.hasNext()) {
+            String key = it.next();
+            String value = headers.optString(key, "");
+            if (key == null || key.length() == 0 || key.length() > 256 || value.length() > 8192
+                    || key.matches(".*[\\r\\n].*") || value.indexOf('\r') >= 0 || value.indexOf('\n') >= 0
+                    || !key.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+")) {
+                return false;
+            }
+            total += key.length() + value.length();
+            if (total > 32768) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean sameOrigin(String first, String second) {
+        try {
+            URL a = new URL(first);
+            URL b = new URL(second);
+            int ap = a.getPort() < 0 ? a.getDefaultPort() : a.getPort();
+            int bp = b.getPort() < 0 ? b.getDefaultPort() : b.getPort();
+            return a.getProtocol().equalsIgnoreCase(b.getProtocol())
+                    && a.getHost().equalsIgnoreCase(b.getHost()) && ap == bp
+                    && a.getUserInfo() == null && b.getUserInfo() == null;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private static JSONObject abortedPayload() {
         JSONObject o = errorPayload("aborted");
         try {
@@ -413,7 +471,20 @@ final class PluginHttp {
                 continue;
             }
             for (String v : e.getValue()) {
-                sb.append(e.getKey()).append(": ").append(v).append("\r\n");
+                if (sb.length() >= MAX_RESPONSE_HEADERS) {
+                    return sb.toString();
+                }
+                int remaining = MAX_RESPONSE_HEADERS - sb.length();
+                String prefix = e.getKey() + ": ";
+                int prefixLength = Math.min(prefix.length(), remaining);
+                sb.append(prefix, 0, prefixLength);
+                remaining -= prefixLength;
+                String value = v == null ? "" : v;
+                int valueLength = Math.min(value.length(), remaining);
+                sb.append(value, 0, valueLength);
+                remaining -= valueLength;
+                if (remaining > 0) sb.append('\r');
+                if (remaining > 1) sb.append('\n');
             }
         }
         return sb.toString();

@@ -7,6 +7,12 @@ import java.util.Locale;
 import java.util.Map;
 
 public final class UserScriptParser {
+    private static final int MAX_META_BLOCK_CHARS = 65536;
+    private static final int MAX_META_LIST_ITEMS = 128;
+    private static final int MAX_META_VALUE_CHARS = 2048;
+    private static final int MAX_REQUIRES = 8;
+    private static final int MAX_RESOURCES = 10;
+    private static final int MAX_CONNECTS = 128;
     public static final class Meta {
         public String name = "";
         public String namespace = "";
@@ -43,7 +49,11 @@ public final class UserScriptParser {
         if (b < 0) {
             return null;
         }
-        return src.substring(a + "==UserScript==".length(), b);
+        int start = a + "==UserScript==".length();
+        if (b - start > MAX_META_BLOCK_CHARS) {
+            return null;
+        }
+        return src.substring(start, b);
     }
 
     public static Meta parse(String src) {
@@ -111,29 +121,31 @@ public final class UserScriptParser {
                     m.noFrames = true;
                     break;
                 case "match":
-                    addIfNotEmpty(m.matches, value);
+                    addIfNotEmpty(m.matches, value, MAX_META_LIST_ITEMS);
                     break;
                 case "include":
-                    addIfNotEmpty(m.includes, value);
+                    addIfNotEmpty(m.includes, value, MAX_META_LIST_ITEMS);
                     break;
                 case "exclude":
-                    addIfNotEmpty(m.excludes, value);
+                    addIfNotEmpty(m.excludes, value, MAX_META_LIST_ITEMS);
                     break;
                 case "exclude-match":
-                    addIfNotEmpty(m.excludeMatches, value);
+                    addIfNotEmpty(m.excludeMatches, value, MAX_META_LIST_ITEMS);
                     break;
                 case "grant":
-                    addIfNotEmpty(m.grants, value);
+                    addIfNotEmpty(m.grants, value, MAX_META_LIST_ITEMS);
                     break;
                 case "require":
-                    addIfNotEmpty(m.requires, value);
+                    addIfNotEmpty(m.requires, value, MAX_REQUIRES);
                     break;
                 case "connect":
-                    addIfNotEmpty(m.connects, value.toLowerCase(Locale.US));
+                    addIfNotEmpty(m.connects, value.toLowerCase(Locale.US), MAX_CONNECTS);
                     break;
                 case "resource": {
                     String[] kv = value.split("\\s+", 2);
-                    if (kv.length == 2 && !kv[0].isEmpty() && !kv[1].trim().isEmpty()) {
+                    if (kv.length == 2 && !kv[0].isEmpty() && !kv[1].trim().isEmpty()
+                            && kv[0].length() <= 128 && kv[1].trim().length() <= MAX_META_VALUE_CHARS
+                            && (m.resources.containsKey(kv[0]) || m.resources.size() < MAX_RESOURCES)) {
                         m.resources.put(kv[0], kv[1].trim());
                     }
                     break;
@@ -156,9 +168,10 @@ public final class UserScriptParser {
         return m;
     }
 
-    private static void addIfNotEmpty(List<String> list, String v) {
-        if (v != null && !v.trim().isEmpty()) {
-            list.add(v.trim());
+    private static void addIfNotEmpty(List<String> list, String v, int limit) {
+        if (v != null && !v.trim().isEmpty() && v.length() <= MAX_META_VALUE_CHARS) {
+            String value = v.trim();
+            if (!list.contains(value) && list.size() < limit) list.add(value);
         }
     }
 
@@ -188,34 +201,38 @@ public final class UserScriptParser {
 
     public static void fillEntry(Meta m, PluginEntry entry, List<String> warnings) {
         for (String raw : m.matches) {
+            if (entry.matches.size() >= 256) break;
             String r = PluginPatterns.fromMatchPattern(raw);
             if (r == null) {
                 warnings.add("無効な@matchを無視: " + raw);
-            } else {
+            } else if (!entry.matches.contains(r)) {
                 entry.matches.add(r);
             }
         }
         for (String raw : m.includes) {
+            if (entry.matches.size() >= 256) break;
             String r = includeToPattern(raw);
             if (r == null) {
                 warnings.add("無効な@includeを無視: " + raw);
-            } else {
+            } else if (!entry.matches.contains(r)) {
                 entry.matches.add(r);
             }
         }
         for (String raw : m.excludes) {
+            if (entry.excludes.size() >= 256) break;
             String r = includeToPattern(raw);
             if (r == null) {
                 warnings.add("無効な@excludeを無視: " + raw);
-            } else {
+            } else if (!entry.excludes.contains(r)) {
                 entry.excludes.add(r);
             }
         }
         for (String raw : m.excludeMatches) {
+            if (entry.excludes.size() >= 256) break;
             String r = PluginPatterns.fromMatchPattern(raw);
             if (r == null) {
                 warnings.add("無効な@exclude-matchを無視: " + raw);
-            } else {
+            } else if (!entry.excludes.contains(r)) {
                 entry.excludes.add(r);
             }
         }

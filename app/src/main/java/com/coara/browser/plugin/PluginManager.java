@@ -51,6 +51,10 @@ public final class PluginManager {
     private static final int MAX_STORAGE_VALUE_LENGTH = 65536;
     private static final int MAX_STORAGE_FILE_BYTES = 512 * 1024;
     private static final int MAX_READ_BYTES = 1024 * 1024;
+    private static final int MAX_SOURCE_CACHE_ENTRIES = 64;
+    private static final int MAX_SOURCE_CACHE_ENTRY_CHARS = 128 * 1024;
+    private static final int MAX_SOURCE_CACHE_CHARS = 2 * 1024 * 1024;
+    private static final int MAX_XHR_RETAINED_CHARS = 16 * 1024 * 1024;
     private static final int LOG_RATE_LIMIT = 60;
     private static final long LOG_RATE_WINDOW_MS = 10_000L;
 
@@ -86,7 +90,8 @@ public final class PluginManager {
     private final List<PluginInfo> plugins = new ArrayList<>();
     private final Map<String, ArrayDeque<Long>> recentErrors = new HashMap<>();
     private final Map<String, JSONObject> storageCache = new HashMap<>();
-    private final Map<String, String> sourceCache = new HashMap<>();
+    private final Map<String, String> sourceCache = new java.util.LinkedHashMap<>(16, 0.75f, true);
+    private int sourceCacheChars;
     private final Map<String, long[]> logRate = new HashMap<>();
     private final CopyOnWriteArrayList<Listener> listeners = new CopyOnWriteArrayList<>();
     private final Set<String> lastInjectedIds = new LinkedHashSet<>();
@@ -240,6 +245,7 @@ public final class PluginManager {
             version++;
             runtimeVersion++;
             sourceCache.clear();
+            sourceCacheChars = 0;
             i18nCache.clear();
             notifyChanged();
             notifyRuntimeChanged();
@@ -347,6 +353,7 @@ public final class PluginManager {
         }
         recentErrors.remove(info.id);
         sourceCache.clear();
+        sourceCacheChars = 0;
         i18nCache.remove(info.id);
         saveLocked(true);
         logger.log("I", info.id, (updated ? "更新" : "インストール") + ": " + info.title
@@ -406,6 +413,7 @@ public final class PluginManager {
         i18nCache.remove(id);
         logRate.remove(id);
         sourceCache.clear();
+        sourceCacheChars = 0;
         logger.removeFor(id);
         saveLocked(true);
         runtimeVersion++;
@@ -438,10 +446,17 @@ public final class PluginManager {
                 return cached;
             }
             String text = readFileText(f);
-            if (sourceCache.size() > 128) {
-                sourceCache.clear();
+            if (text.length() <= MAX_SOURCE_CACHE_ENTRY_CHARS && text.length() <= MAX_SOURCE_CACHE_CHARS) {
+                while (!sourceCache.isEmpty() && (sourceCache.size() >= MAX_SOURCE_CACHE_ENTRIES
+                        || sourceCacheChars + text.length() > MAX_SOURCE_CACHE_CHARS)) {
+                    String oldest = sourceCache.keySet().iterator().next();
+                    String removed = sourceCache.remove(oldest);
+                    if (removed != null) sourceCacheChars = Math.max(0, sourceCacheChars - removed.length());
+                }
+                String previous = sourceCache.put(key, text);
+                if (previous != null) sourceCacheChars = Math.max(0, sourceCacheChars - previous.length());
+                sourceCacheChars += text.length();
             }
-            sourceCache.put(key, text);
             return text;
         } catch (Exception e) {
             return null;
@@ -679,11 +694,17 @@ public final class PluginManager {
     }
 
     private static boolean isHttpUrl(String u) {
-        if (u == null) {
+        if (u == null || u.isEmpty() || u.length() > 8192 || u.indexOf('\r') >= 0 || u.indexOf('\n') >= 0) {
             return false;
         }
-        String l = u.toLowerCase(Locale.US);
-        return l.startsWith("http://") || l.startsWith("https://");
+        try {
+            java.net.URL parsed = new java.net.URL(u);
+            String protocol = parsed.getProtocol();
+            return ("http".equalsIgnoreCase(protocol) || "https".equalsIgnoreCase(protocol))
+                    && parsed.getHost() != null && !parsed.getHost().isEmpty() && parsed.getUserInfo() == null;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private String resolveName(PluginInfo p, String name) {
@@ -709,7 +730,7 @@ public final class PluginManager {
     }
 
     private boolean xhrStart(PluginInfo p, String reqId, String optsJson) {
-        if (reqId == null || reqId.isEmpty() || reqId.length() > 40 || optsJson == null) {
+        if (reqId == null || reqId.isEmpty() || reqId.length() > 40 || optsJson == null || optsJson.length() > 3_000_000) {
             return false;
         }
         final JSONObject opts;
@@ -719,35 +740,60 @@ public final class PluginManager {
             return false;
         }
         final String key = p.id + ":" + reqId;
-        long now = System.currentTimeMillis();
-        int active = 0;
-        for (Map.Entry<String, XhrState> e : xhrs.entrySet()) {
-            XhrState s = e.getValue();
-            if (s.result != null && now - s.doneAt > 120_000L) {
-                xhrs.remove(e.getKey());
-            } else if (s.result == null && e.getKey().startsWith(p.id + ":")) {
-                active++;
-            }
-        }
-        if (active >= 8 || xhrs.containsKey(key) || xhrs.size() > 64) {
-            return false;
-        }
         final XhrState state = new XhrState();
-        xhrs.put(key, state);
+        synchronized (xhrs) {
+            long now = System.currentTimeMillis();
+            int active = 0;
+            int activeGlobal = 0;
+            Iterator<Map.Entry<String, XhrState>> it = xhrs.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry<String, XhrState> e = it.next();
+                XhrState current = e.getValue();
+                if (current.result != null && now - current.doneAt > 30_000L) {
+                    it.remove();
+                } else if (current.result == null) {
+                    activeGlobal++;
+                    if (e.getKey().startsWith(p.id + ":")) active++;
+                }
+            }
+            if (active >= 4 || activeGlobal >= 8 || xhrs.containsKey(key) || xhrs.size() >= 64) {
+                return false;
+            }
+            xhrs.put(key, state);
+        }
         final List<String> connects = new ArrayList<>(p.connects);
         final String pid = p.id;
         final String shownUrl = isSecretProcess() ? "(secret)" : stripQueryAndFragment(opts.optString("url", ""));
-        xhrPool.execute(new Runnable() {
+        try {
+            xhrPool.execute(new Runnable() {
             @Override
             public void run() {
                 JSONObject result = PluginHttp.execute(opts, connects, state.call);
                 if (result.has("error") && !result.optBoolean("aborted", false)) {
                     logger.log("W", pid, "xhr失敗: " + result.optString("error") + " url=" + shownUrl);
                 }
-                state.result = result.toString();
-                state.doneAt = System.currentTimeMillis();
+                String serialized = result.toString();
+                synchronized (xhrs) {
+                    long retained = 0L;
+                    for (Map.Entry<String, XhrState> entry : xhrs.entrySet()) {
+                        XhrState existing = entry.getValue();
+                        if (existing != state && existing.result != null) retained += existing.result.length();
+                    }
+                    if (serialized.length() > MAX_XHR_RETAINED_CHARS
+                            || retained + serialized.length() > MAX_XHR_RETAINED_CHARS) {
+                        serialized = PluginHttp.errorPayload("response retention limit").toString();
+                    }
+                    state.result = serialized;
+                    state.doneAt = System.currentTimeMillis();
+                }
             }
-        });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            synchronized (xhrs) {
+                xhrs.remove(key, state);
+            }
+            return false;
+        }
         return true;
     }
 
@@ -756,16 +802,18 @@ public final class PluginManager {
             return null;
         }
         String key = id + ":" + reqId;
-        XhrState s = xhrs.get(key);
-        if (s == null) {
-            return null;
+        synchronized (xhrs) {
+            XhrState s = xhrs.get(key);
+            if (s == null) {
+                return null;
+            }
+            String r = s.result;
+            if (r == null) {
+                return "";
+            }
+            xhrs.remove(key, s);
+            return r;
         }
-        String r = s.result;
-        if (r == null) {
-            return "";
-        }
-        xhrs.remove(key);
-        return r;
     }
 
     private void xhrAbort(String id, String reqId) {

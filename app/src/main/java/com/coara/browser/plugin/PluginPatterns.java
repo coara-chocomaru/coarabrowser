@@ -15,6 +15,8 @@ public final class PluginPatterns {
     private static final String NO_MATCH_ORIGIN = "https://no-match.invalid";
 
     private static final Map<String, Pattern> PATTERN_CACHE = new ConcurrentHashMap<>();
+    private static final int MAX_PATTERN_LIST = 128;
+    private static final int MAX_LIST_CHARS = 65536;
     private static final String SPECIALS = "\\.[]{}()+^$|";
 
     static {
@@ -29,27 +31,48 @@ public final class PluginPatterns {
 
     public static List<String> parseList(String raw) {
         List<String> out = new ArrayList<>();
-        if (raw == null) {
+        if (raw == null || raw.isEmpty()) {
             return out;
         }
-        String[] tokens = raw.trim().split("[\\s;]+");
-        for (String token : tokens) {
-            String t = token.trim();
-            if (t.isEmpty()) {
-                continue;
+        int end = Math.min(raw.length(), MAX_LIST_CHARS);
+        int start = 0;
+        while (start < end && out.size() < MAX_PATTERN_LIST) {
+            while (start < end && (Character.isWhitespace(raw.charAt(start)) || raw.charAt(start) == ';')) {
+                start++;
             }
-            if (t.length() > 2 && t.startsWith("/") && t.endsWith("/")) {
-                out.add(t);
-                continue;
+            if (start >= end) {
+                break;
             }
-            for (String part : t.split(",")) {
-                String p = part.trim();
-                if (!p.isEmpty()) {
-                    out.add(p);
-                }
+            int stop = start;
+            while (stop < end && !Character.isWhitespace(raw.charAt(stop)) && raw.charAt(stop) != ';') {
+                stop++;
             }
+            addListToken(out, raw.substring(start, stop));
+            start = stop;
         }
         return out;
+    }
+
+    private static void addListToken(List<String> out, String token) {
+        String value = token.trim();
+        if (value.isEmpty() || out.size() >= MAX_PATTERN_LIST) {
+            return;
+        }
+        if (value.length() > 2 && value.startsWith("/") && value.endsWith("/")) {
+            if (value.length() <= 514) out.add(value);
+            return;
+        }
+        int start = 0;
+        while (start <= value.length() && out.size() < MAX_PATTERN_LIST) {
+            int comma = value.indexOf(',', start);
+            int end = comma < 0 ? value.length() : comma;
+            String part = value.substring(start, end).trim();
+            if (!part.isEmpty() && part.length() <= 2048) {
+                out.add(part);
+            }
+            if (comma < 0) break;
+            start = comma + 1;
+        }
     }
 
     public static String toRegex(String pattern) {
@@ -68,6 +91,9 @@ public final class PluginPatterns {
         }
         if (p.length() > 2 && p.startsWith("/") && p.endsWith("/")) {
             String inner = p.substring(1, p.length() - 1);
+            if (inner.length() > 512 || isRiskyRegex(inner)) {
+                return null;
+            }
             try {
                 Pattern.compile(inner);
             } catch (Exception e) {
@@ -77,10 +103,17 @@ public final class PluginPatterns {
         }
         StringBuilder sb = new StringBuilder(p.length() + 8);
         sb.append('^');
+        int wildcards = 0;
         for (int i = 0; i < p.length(); i++) {
             char c = p.charAt(i);
             if (c == '*') {
-                sb.append(".*");
+                wildcards++;
+                if (wildcards > 32) {
+                    return null;
+                }
+                if (i == 0 || p.charAt(i - 1) != '*') {
+                    sb.append(".*");
+                }
             } else if (c == '?') {
                 sb.append('.');
             } else if (SPECIALS.indexOf(c) >= 0) {
@@ -91,12 +124,97 @@ public final class PluginPatterns {
         }
         sb.append('$');
         String regex = sb.toString();
+        if (isRiskyRegex(regex)) {
+            return null;
+        }
         try {
             Pattern.compile(regex);
         } catch (Exception e) {
             return null;
         }
         return regex;
+    }
+
+    private static boolean isRiskyRegex(String regex) {
+        if (regex == null || regex.length() > 4096) {
+            return true;
+        }
+        if (Pattern.compile("\\\\[1-9]").matcher(regex).find()) {
+            return true;
+        }
+        List<boolean[]> groups = new ArrayList<>();
+        groups.add(new boolean[2]);
+        boolean escaped = false;
+        boolean inClass = false;
+        int quantifiers = 0;
+        int unboundedQuantifiers = 0;
+        for (int i = 0; i < regex.length(); i++) {
+            char c = regex.charAt(i);
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (c == '[') {
+                inClass = true;
+                continue;
+            }
+            if (c == ']') {
+                inClass = false;
+                continue;
+            }
+            if (inClass) {
+                continue;
+            }
+            if (c == '(') {
+                if (groups.size() > 64) {
+                    return true;
+                }
+                groups.add(new boolean[2]);
+                continue;
+            }
+            if (c == '|') {
+                groups.get(groups.size() - 1)[1] = true;
+                continue;
+            }
+            if (c == ')') {
+                if (groups.size() <= 1) {
+                    continue;
+                }
+                boolean[] group = groups.remove(groups.size() - 1);
+                int j = i + 1;
+                boolean repeated = j < regex.length() && (regex.charAt(j) == '*' || regex.charAt(j) == '+');
+                if (!repeated && j < regex.length() && regex.charAt(j) == '{') {
+                    int close = regex.indexOf('}', j + 1);
+                    repeated = close > j + 1 && Character.isDigit(regex.charAt(j + 1));
+                }
+                if (repeated && (group[0] || group[1])) {
+                    return true;
+                }
+                if (repeated) {
+                    groups.get(groups.size() - 1)[0] = true;
+                }
+                continue;
+            }
+            boolean unbounded = c == '*' || c == '+';
+            boolean quantifier = unbounded || c == '?';
+            if (c == '{') {
+                int close = regex.indexOf('}', i + 1);
+                quantifier = close > i + 1 && Character.isDigit(regex.charAt(i + 1));
+            }
+            if (quantifier && !(c == '?' && i > 0 && regex.charAt(i - 1) == '(')) {
+                quantifiers++;
+                if (unbounded) unboundedQuantifiers++;
+                if (quantifiers > 24 || unboundedQuantifiers > 3) {
+                    return true;
+                }
+                groups.get(groups.size() - 1)[0] = true;
+            }
+        }
+        return false;
     }
 
     public static Set<String> toAllowedOriginRules(List<String> patterns) {
@@ -202,6 +320,7 @@ public final class PluginPatterns {
             return out;
         }
         for (String p : patterns) {
+            if (out.size() >= MAX_PATTERN_LIST) break;
             String r = toRegex(p);
             if (r != null) {
                 out.add(r);
@@ -218,10 +337,12 @@ public final class PluginPatterns {
     }
 
     public static boolean matchesAny(List<String> regexes, String url) {
-        if (url == null || regexes == null || regexes.isEmpty()) {
+        if (url == null || url.length() > 8192 || regexes == null || regexes.isEmpty()) {
             return false;
         }
+        int checked = 0;
         for (String r : regexes) {
+            if (checked++ >= MAX_PATTERN_LIST) break;
             Pattern p = PATTERN_CACHE.get(r);
             if (p == null) {
                 try {
@@ -326,6 +447,16 @@ public final class PluginPatterns {
         } else {
             host = rest.substring(0, slash);
             path = rest.substring(slash);
+        }
+        int wildcardCount = 0;
+        for (int i = 0; i < host.length(); i++) {
+            if (host.charAt(i) == '*') wildcardCount++;
+        }
+        for (int i = 0; i < path.length(); i++) {
+            if (path.charAt(i) == '*') wildcardCount++;
+        }
+        if (wildcardCount > 32) {
+            return null;
         }
         String hostRegex;
         if (scheme.equals("file")) {
