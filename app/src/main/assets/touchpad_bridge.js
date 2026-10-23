@@ -40,7 +40,7 @@
     function sendHost(kind, a, b) {
         try {
             if (window.CoaraNativeBridge && typeof window.CoaraNativeBridge.postMessage === "function") {
-                window.CoaraNativeBridge.postMessage(JSON.stringify({type:"touchpad",kind:kind,a:a,b:b}));
+                window.CoaraNativeBridge.postMessage("t,"+kind+","+a+","+b);
                 return true;
             }
             if (window.AndroidBridge && typeof window.AndroidBridge.touchpadNative === "function") {
