@@ -1,7 +1,5 @@
 -keepattributes RuntimeVisibleAnnotations,SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile
--allowaccessmodification
--repackageclasses ''
 
 -keepclassmembers,allowoptimization class * {
     @android.webkit.JavascriptInterface <methods>;
@@ -16,5 +14,3 @@
     public static int d(...);
     public static int i(...);
 }
-
--dontnote **
