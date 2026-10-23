@@ -157,6 +157,8 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
     private static Method sSetAppCachePathMethod;
     private static boolean sWebViewDataDirectoryConfigured = false;
     private PermissionRequest pendingPermissionRequest = null;
+    private WebView pendingPermissionWebView = null;
+    private String pendingPermissionOrigin = "";
     private final java.util.Set<String> approvedCaptureOrigins = new java.util.HashSet<>();
     private ActivityResultLauncher<String[]> permissionRequestLauncher;
 
@@ -433,24 +435,44 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         permissionRequestLauncher = registerForActivityResult(
         new ActivityResultContracts.RequestMultiplePermissions(),
         result -> {
-            if (pendingPermissionRequest == null) return;
+            PermissionRequest request = pendingPermissionRequest;
+            WebView requestedWebView = pendingPermissionWebView;
+            String requestedOrigin = pendingPermissionOrigin;
+            pendingPermissionRequest = null;
+            pendingPermissionWebView = null;
+            pendingPermissionOrigin = "";
+            if (request == null) return;
             boolean allGranted = true;
             for (Boolean granted : result.values()) {
-                if (!granted) {
+                if (!Boolean.TRUE.equals(granted)) {
                     allGranted = false;
                     break;
                 }
             }
+            boolean currentOrigin = requestedWebView != null
+                    && requestedWebView == getCurrentWebView()
+                    && BridgeGuard.isSecureCaptureOrigin(requestedOrigin)
+                    && BridgeGuard.sameOrigin(requestedOrigin, requestedWebView.getUrl())
+                    && request.getOrigin() != null
+                    && BridgeGuard.sameOrigin(requestedOrigin, request.getOrigin().toString());
             try {
-                if (allGranted) {
-                    pendingPermissionRequest.grant(pendingPermissionRequest.getResources());
+                if (allGranted && currentOrigin) {
+                    List<String> grantable = getGrantableCaptureResources(request);
+                    if (grantable.isEmpty()) {
+                        request.deny();
+                    } else {
+                        request.grant(grantable.toArray(new String[0]));
+                        approvedCaptureOrigins.add(requestedOrigin);
+                    }
                 } else {
-                    pendingPermissionRequest.deny();
+                    request.deny();
+                    if (!allGranted) {
+                        approvedCaptureOrigins.remove(requestedOrigin);
+                    }
                 }
             } catch (Exception e) {
-                e.printStackTrace();
+                try { request.deny(); } catch (Exception ignored) {}
             }
-            pendingPermissionRequest = null;
         }
     );
         fileChooserLauncher = registerForActivityResult(
@@ -802,7 +824,9 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         KeyboardSettings.configureWebView(webView, pref);
         webView.setScrollBarStyle(View.SCROLLBARS_INSIDE_OVERLAY);
         webView.setBackgroundColor(Color.WHITE);
-        webView.addJavascriptInterface(new AndroidBridge(webView), "AndroidBridge");
+        AndroidBridge androidBridge = new AndroidBridge(webView);
+        webView.addJavascriptInterface(androidBridge, "AndroidBridge");
+        com.coara.browser.webview.WebViewOptimizationUtils.installNativeBridgeToken(webView, androidBridge.getBridgeToken());
         webView.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -854,7 +878,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
                 "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/83.0.4103.106 Safari/537.36");
         }
 
-        BlobDownloadBridge blobDownloadBridge = new BlobDownloadBridge(this);
+        BlobDownloadBridge blobDownloadBridge = new BlobDownloadBridge(this, webView);
         blobDownloadBridges.put(webView, blobDownloadBridge);
         webView.addJavascriptInterface(blobDownloadBridge, "BlobDownloader");
         PluginRuntime.attach(this, webView);
@@ -1090,6 +1114,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
             }
             @Override
             public void onPageFinished(WebView view, String url) {
+                com.coara.browser.webview.WebViewOptimizationUtils.refreshNativeBridgeToken(view);
                 loadedPages.add(view);
                 ExternalDownloadTabTracker.onPageFinished(view, url);
                 if (findController != null) {
@@ -1128,7 +1153,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
           "var href=location.href;" +
           "if(!force&&href===window.__coaraLastHref)return;" +
           "window.__coaraLastHref=href;" +
-          "try{AndroidBridge.onUrlChange(href);}catch(ex){}" +
+          "try{AndroidBridge.onUrlChange(href,window.__coaraNativeBridgeToken);}catch(ex){}" +
           "};" +
           "var pushState=history.pushState;" +
           "history.pushState=function(){var r=pushState.apply(history,arguments);notifyUrlChange(true);return r;};" +
@@ -1138,7 +1163,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
           "window.addEventListener('hashchange',function(){notifyUrlChange(true);});" +
           "notifyUrlChange(true);" +
           "}else{" +
-          "try{AndroidBridge.onUrlChange(location.href);}catch(ex2){}" +
+          "try{AndroidBridge.onUrlChange(location.href,window.__coaraNativeBridgeToken);}catch(ex2){}" +
           "}" +
           "}catch(e){}" +
           "})();"; 
@@ -1192,6 +1217,13 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
                     }
                 }
                 final String originKey = request.getOrigin() == null ? "" : request.getOrigin().toString();
+                WebView permissionWebView = getCurrentWebView();
+                if (!BridgeGuard.isSecureCaptureOrigin(originKey)
+                        || permissionWebView == null
+                        || !BridgeGuard.sameOrigin(originKey, permissionWebView.getUrl())) {
+                    request.deny();
+                    return;
+                }
                 if (capture && !approvedCaptureOrigins.contains(originKey)) {
                     if (isFinishing()) {
                         request.deny();
@@ -1202,7 +1234,13 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
                             .setMessage(originKey + "\nがカメラまたはマイクの使用を求めています。")
                             .setCancelable(false)
                             .setPositiveButton("許可", (d, w) -> {
-                                approvedCaptureOrigins.add(originKey);
+                                if (permissionWebView != getCurrentWebView()
+                                        || !BridgeGuard.sameOrigin(originKey, permissionWebView.getUrl())
+                                        || request.getOrigin() == null
+                                        || !BridgeGuard.sameOrigin(originKey, request.getOrigin().toString())) {
+                                    request.deny();
+                                    return;
+                                }
                                 handleMediaPermission(request);
                             })
                             .setNegativeButton("拒否", (d, w) -> request.deny())
@@ -1234,8 +1272,15 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
                     }
                 }
             }
+            List<String> grantable = getGrantableCaptureResources(request);
+            if (grantable.isEmpty()) {
+                request.deny();
+                return;
+            }
             if (permissionsNeeded.isEmpty()) {
-                request.grant(resources);
+                request.grant(grantable.toArray(new String[0]));
+                String origin = request.getOrigin() == null ? "" : request.getOrigin().toString();
+                approvedCaptureOrigins.add(origin);
             } else {
                 if (pendingPermissionRequest != null) {
                     try {
@@ -1243,7 +1288,17 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
                     } catch (Exception ignored) {
                     }
                 }
+                WebView requestView = getCurrentWebView();
+                String requestOrigin = request.getOrigin() == null ? "" : request.getOrigin().toString();
+                if (requestView == null || requestView != getCurrentWebView()
+                        || !BridgeGuard.isSecureCaptureOrigin(requestOrigin)
+                        || !BridgeGuard.sameOrigin(requestOrigin, requestView.getUrl())) {
+                    request.deny();
+                    return;
+                }
                 pendingPermissionRequest = request;
+                pendingPermissionWebView = requestView;
+                pendingPermissionOrigin = requestOrigin;
                 permissionRequestLauncher.launch(permissionsNeeded.toArray(new String[0]));
             }
         } catch (Exception e) {
@@ -1499,11 +1554,23 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
                 "})();";
         try {
             BlobDownloadBridge bridge = blobDownloadBridges.get(current);
-            if (bridge != null && ExternalDownloadTabTracker.isExternal(current)) {
+            if (bridge == null) {
+                Toast.makeText(SecretActivity.this, "blobダウンロードを開始できません", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            if (!bridge.authorizeDownload(token)) {
+                Toast.makeText(SecretActivity.this, "ダウンロードの処理が混み合っています", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            if (ExternalDownloadTabTracker.isExternal(current)) {
                 bridge.registerCloseAfterDownload(token, this, current, url, () -> closeTab(current));
             }
             current.evaluateJavascript(js, null);
         } catch (Exception e) {
+            BlobDownloadBridge bridge = blobDownloadBridges.get(current);
+            if (bridge != null) {
+                bridge.cancelAuthorization(token);
+            }
             Toast.makeText(SecretActivity.this, "blobダウンロードを開始できません", Toast.LENGTH_SHORT).show();
         }
     }
@@ -1710,6 +1777,27 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         urlEditText.setText(url);
     }
 
+    private List<String> getGrantableCaptureResources(final PermissionRequest request) {
+        List<String> grantable = new ArrayList<>();
+        if (request == null) return grantable;
+        String[] requested;
+        try {
+            requested = request.getResources();
+        } catch (Exception e) {
+            return grantable;
+        }
+        for (String resource : requested) {
+            if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(resource)
+                    && ContextCompat.checkSelfPermission(SecretActivity.this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                grantable.add(resource);
+            } else if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)
+                    && ContextCompat.checkSelfPermission(SecretActivity.this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                grantable.add(resource);
+            }
+        }
+        return grantable;
+    }
+
     private WebView getCurrentWebView() {
         return webView;
     }
@@ -1909,15 +1997,35 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
 
 private class AndroidBridge {
     private final WebView owner;
+    private final String bridgeToken = java.util.UUID.randomUUID().toString().replace("-", "")
+            + java.util.UUID.randomUUID().toString().replace("-", "");
+
     AndroidBridge(WebView owner) {
         this.owner = owner;
     }
+
+    String getBridgeToken() {
+        return bridgeToken;
+    }
+
+    private boolean isAuthorized(String candidate) {
+        return candidate != null && java.security.MessageDigest.isEqual(
+                bridgeToken.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                candidate.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
     @JavascriptInterface
-    public void touchpadNative(final int kind, final float a, final float b) {
+    public void touchpadNative(final int kind, final float a, final float b, final String token) {
+        if (!isAuthorized(token) || owner != getCurrentWebView() || !BridgeGuard.isWebPage(owner.getUrl())) {
+            return;
+        }
         TouchpadController.postHostRequest(owner, kind, a, b);
     }
     @JavascriptInterface
-    public void onPointerLockChanged(final boolean locked) {
+    public void onPointerLockChanged(final boolean locked, final String token) {
+        if (!isAuthorized(token) || !BridgeGuard.isWebPage(owner.getUrl())) {
+            return;
+        }
         UiThread.post(() -> {
             try {
                 if (owner == getCurrentWebView()) {
@@ -1927,7 +2035,10 @@ private class AndroidBridge {
         });
     }
     @JavascriptInterface
-    public void onUrlChange(final String url) {
+    public void onUrlChange(final String url, final String token) {
+        if (!isAuthorized(token) || !BridgeGuard.isWebPage(owner.getUrl())) {
+            return;
+        }
         UiThread.post(() -> {
             try {
                 WebView current = getCurrentWebView();

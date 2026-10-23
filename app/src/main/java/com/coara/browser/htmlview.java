@@ -67,6 +67,8 @@ public class htmlview extends AppCompatActivity {
     private static final int INITIAL_HIGHLIGHT_RANGE = 12000;
     private static final int MAX_UNDO_ENTRIES = 12;
     private static final int MAX_UNDO_HISTORY_CHARS = 2000000;
+    private static final int MAX_HTML_CHARS = 4 * 1024 * 1024;
+    private static final long MAX_HTML_CONTENT_LENGTH = 8L * 1024L * 1024L;
     private static final int MAX_SEARCH_MATCHES = 10000;
     private static final long HIGHLIGHT_DELAY_MS = 260;
     private static final long VIEWPORT_DELAY_MS = 90;
@@ -466,6 +468,11 @@ public class htmlview extends AppCompatActivity {
             HttpURLConnection connection = null;
             try {
                 URL url = new URL(urlString);
+                String protocol = url.getProtocol();
+                if (!("http".equalsIgnoreCase(protocol) || "https".equalsIgnoreCase(protocol))
+                        || url.getHost() == null || url.getHost().isEmpty() || url.getUserInfo() != null) {
+                    throw new java.io.IOException("HTTP(S) URLのみ利用できます");
+                }
                 connection = (HttpURLConnection) url.openConnection();
                 connection.setUseCaches(false);
                 connection.setInstanceFollowRedirects(true);
@@ -477,6 +484,10 @@ public class htmlview extends AppCompatActivity {
                 if (statusCode < 200 || statusCode >= 400) {
                     throw new java.io.IOException("HTTP " + statusCode);
                 }
+                long contentLength = connection.getContentLengthLong();
+                if (contentLength > MAX_HTML_CONTENT_LENGTH) {
+                    throw new java.io.IOException("HTMLサイズが上限を超えています");
+                }
                 Charset charset = getResponseCharset(connection.getContentType());
                 StringBuilder result = new StringBuilder();
                 try (InputStream input = connection.getInputStream();
@@ -484,6 +495,9 @@ public class htmlview extends AppCompatActivity {
                     char[] buffer = new char[8192];
                     int count;
                     while ((count = reader.read(buffer)) != -1) {
+                        if (result.length() + count > MAX_HTML_CHARS) {
+                            throw new java.io.IOException("HTMLサイズが上限を超えています");
+                        }
                         result.append(buffer, 0, count);
                     }
                 }
@@ -569,6 +583,9 @@ public class htmlview extends AppCompatActivity {
                         char[] buffer = new char[8192];
                         int count;
                         while ((count = reader.read(buffer)) != -1) {
+                            if (result.length() + count > MAX_HTML_CHARS) {
+                                throw new java.io.IOException("HTMLサイズが上限を超えています");
+                            }
                             result.append(buffer, 0, count);
                         }
                     }
