@@ -1,5 +1,6 @@
 package com.coara.browser.webview;
 
+import android.net.Uri;
 import android.os.Build;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -16,9 +17,11 @@ import org.json.JSONObject;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.WeakHashMap;
 
 public final class WebViewOptimizationUtils {
     private static final Map<String, Boolean> FEATURE_SUPPORT_CACHE = new HashMap<>();
+    private static final Map<WebView, Boolean> TOKEN_SCRIPT_INSTALLED = Collections.synchronizedMap(new WeakHashMap<WebView, Boolean>());
 
     private WebViewOptimizationUtils() {}
 
@@ -28,15 +31,20 @@ public final class WebViewOptimizationUtils {
         }
         webView.setTag(R.id.native_bridge_token, token);
         String script = nativeBridgeTokenScript(token);
+        boolean installed = false;
         if (isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             try {
                 WebViewCompat.addDocumentStartJavaScript(webView, script, Collections.singleton("*"));
+                installed = true;
             } catch (Throwable ignored) {
             }
         }
-        try {
-            webView.evaluateJavascript(script, null);
-        } catch (Throwable ignored) {
+        TOKEN_SCRIPT_INSTALLED.put(webView, installed);
+        if (!installed) {
+            try {
+                webView.evaluateJavascript(script, null);
+            } catch (Throwable ignored) {
+            }
         }
     }
 
@@ -48,9 +56,40 @@ public final class WebViewOptimizationUtils {
         if (!(value instanceof String)) {
             return;
         }
+        if (Boolean.TRUE.equals(TOKEN_SCRIPT_INSTALLED.get(webView))) {
+            return;
+        }
         try {
             webView.evaluateJavascript(nativeBridgeTokenScript((String) value), null);
         } catch (Throwable ignored) {
+        }
+    }
+
+    public static boolean shouldInjectYoutubeLazyLoading(String url) {
+        if (url == null || !url.regionMatches(true, 0, "https://", 0, 8)) {
+            return false;
+        }
+        try {
+            Uri uri = Uri.parse(url);
+            String host = uri.getHost();
+            return "m.youtube.com".equalsIgnoreCase(host) || "www.youtube.com".equalsIgnoreCase(host);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public static boolean shouldInjectSecretLazyLoading(String url) {
+        if (shouldInjectYoutubeLazyLoading(url)) {
+            return true;
+        }
+        if (url == null || !url.regionMatches(true, 0, "https://", 0, 8)) {
+            return false;
+        }
+        try {
+            String host = Uri.parse(url).getHost();
+            return "chatgpt.com".equalsIgnoreCase(host) || (host != null && host.toLowerCase(java.util.Locale.ROOT).endsWith(".chatgpt.com"));
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
@@ -272,22 +311,17 @@ public final class WebViewOptimizationUtils {
             + "if(root&&root.childElementCount>3)s=true;"
             + "}"
             + "if(!s){"
-            + "var scr=document.querySelectorAll('script[src]'),bc=0;"
-            + "for(var j=0;j<scr.length;j++){"
-            + "var src=scr[j].getAttribute('src')||'';"
+            + "var scr=document.scripts||[],bc=0;"
+            + "for(var j=0;j<scr.length&&j<100;j++){"
+            + "var src=scr[j].src||scr[j].getAttribute('src')||'';"
             + "if(src.indexOf('.chunk.js')>-1||src.indexOf('.bundle.js')>-1"
             + "||src.indexOf('/chunk.')>-1||src.indexOf('/bundle.')>-1)bc++;"
             + "if(bc>=2){s=true;break;}"
             + "}"
             + "}"
             + "if(!s){"
-            + "try{"
-            + "if(history.pushState.toString().indexOf('native code')===-1)s=true;"
-            + "}catch(pe){}"
-            + "}"
-            + "if(!s){"
-            + "var cs=document.querySelectorAll('canvas');"
-            + "for(var i=0;i<cs.length;i++){"
+            + "var cs=document.getElementsByTagName('canvas');"
+            + "for(var i=0;i<cs.length&&i<20;i++){"
             + "if(cs[i].offsetWidth>100&&cs[i].offsetHeight>100){s=true;break;}"
             + "}"
             + "}"
@@ -310,8 +344,30 @@ public final class WebViewOptimizationUtils {
             + "AndroidBridge.onSpaDetected(s,window.__coaraNativeBridgeToken);"
             + "})();";
 
+    private static final String SPA_RECHECK_JS = "javascript:(function(){try{"
+            + "if(window.__coaraSpaDetected===true)return;"
+            + "var s=false;"
+            + "if(document.getElementById('__next')||document.getElementById('__nuxt')"
+            + "||document.querySelector('[data-reactroot]')||document.querySelector('[data-v-app]')"
+            + "||document.querySelector('[ng-version]'))s=true;"
+            + "if(!s){var r=document.getElementById('root')||document.getElementById('app');if(r&&r.childElementCount>3)s=true;}"
+            + "if(s){window.__coaraSpaDetected=true;try{AndroidBridge.onSpaDetected(true,window.__coaraNativeBridgeToken);}catch(e){}}"
+            + "}catch(e){}})();";
+
     public static void injectSpaProbe(WebView webView) {
-        webView.evaluateJavascript(SPA_PROBE_JS, null);
+        if (webView == null) return;
+        try {
+            webView.evaluateJavascript(SPA_PROBE_JS, null);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public static void recheckSpaProbe(WebView webView) {
+        if (webView == null) return;
+        try {
+            webView.evaluateJavascript(SPA_RECHECK_JS, null);
+        } catch (Throwable ignored) {
+        }
     }
 
     public static void injectLazyLoading(WebView webView) {
@@ -319,8 +375,8 @@ public final class WebViewOptimizationUtils {
                 + "try{if(window.__coaraLazyLoadingApplied)return;window.__coaraLazyLoadingApplied=true;}catch(e){}"
                 + "var PH='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';"
                 + "var imgs=document.querySelectorAll('img[src^=\"https://i.ytimg.com/\"]:not([data-lazy-loaded])');"
-                + "if(imgs.length===0)return;"
-                + "imgs.forEach(function(img){"
+                + "if(imgs.length===0)return;var total=Math.min(imgs.length,200);"
+                + "for(var z=0;z<total;z++){var img=imgs[z];"
                 + "img.setAttribute('data-lazy-loaded','true');"
                 + "img.setAttribute('loading','lazy');"
                 + "if(img.hasAttribute('src')){"
@@ -330,7 +386,7 @@ public final class WebViewOptimizationUtils {
                 + "img.style.transition='opacity 0.25s ease';"
                 + "if(!img.style.transform)img.style.transform='translateZ(0)';"
                 + "}"
-                + "});"
+                + "}"
                 + "if('IntersectionObserver' in window){"
                 + "var ob=new IntersectionObserver(function(entries){"
                 + "entries.forEach(function(e){"
@@ -346,21 +402,20 @@ public final class WebViewOptimizationUtils {
                 + "}"
                 + "});"
                 + "},{root:null,rootMargin:'200px 0px',threshold:0});"
-                + "imgs.forEach(function(img){ob.observe(img);});"
+                + "for(var z=0;z<total;z++)ob.observe(imgs[z]);"
                 + "}else{"
                 + "function inVP(el){"
                 + "var r=el.getBoundingClientRect();"
                 + "return r.top<=(window.innerHeight||document.documentElement.clientHeight)+200&&r.bottom>=0;"
                 + "}"
                 + "function load(){"
-                + "imgs.forEach(function(img){"
+                + "for(var z=0;z<total;z++){var img=imgs[z];"
                 + "if(img.dataset.src&&inVP(img)){"
                 + "img.src=img.dataset.src;"
                 + "img.removeAttribute('data-src');"
                 + "img.onload=function(){img.style.opacity='1';};"
                 + "img.onerror=function(){console.warn('Lazy:'+img.src);};"
                 + "}"
-                + "});"
                 + "}"
                 + "['scroll','resize','load'].forEach(function(ev){"
                 + "window.addEventListener(ev,load,{passive:true});"
