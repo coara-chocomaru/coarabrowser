@@ -32,7 +32,7 @@
     function host(kind, a, b) {
         try {
             if (window.AndroidBridge && typeof window.AndroidBridge.touchpadNative === "function") {
-                window.AndroidBridge.touchpadNative(kind, a, b);
+                window.AndroidBridge.touchpadNative(kind, a, b, window.__coaraNativeBridgeToken);
                 return true;
             }
         } catch (e) {}

@@ -32,6 +32,7 @@ return false;
 }
 var href="";
 try{href=String(location.href);}catch(e){}
+if(href.length>8192)return"0";
 if(!META.allFrames&&!isTop)return"0";
 if(META.excludes.length&&rx(META.excludes,href))return"0";
 if(!rx(META.matches,href))return"0";
@@ -61,11 +62,21 @@ return out.join(" ");
 function safe(f){
 try{f(api);}catch(e){rep("runtime",e&&e.message?e.message:String(e),e&&e.stack);}
 }
+var MAX_STYLE_COUNT=64;
+var MAX_STYLE_CHARS=262144;
+var MAX_STYLE_TOTAL_CHARS=524288;
+var styleCount=0;
+var styleChars=0;
 function addStyle(css){
-var text=String(css);
+var text;
+try{text=String(css);}catch(e){text="";}
+if(text.length>MAX_STYLE_CHARS||styleCount>=MAX_STYLE_COUNT||styleChars+text.length>MAX_STYLE_TOTAL_CHARS)return{remove:function(){}};
+styleCount++;
+styleChars+=text.length;
 var handle={};
 var sheet=null;
 var el=null;
+var removed=false;
 try{
 if(typeof CSSStyleSheet==="function"&&("adoptedStyleSheets" in document)){
 sheet=new CSSStyleSheet();
@@ -75,6 +86,7 @@ document.adoptedStyleSheets=document.adoptedStyleSheets.concat([sheet]);
 }catch(e){sheet=null;}
 if(!sheet){
 var attach=function(){
+if(removed)return;
 try{
 el=document.createElement("style");
 el.textContent=text;
@@ -85,6 +97,10 @@ if(document.head||document.documentElement){attach();}
 else{document.addEventListener("DOMContentLoaded",attach,{once:true});}
 }
 handle.remove=function(){
+if(removed)return;
+removed=true;
+styleCount=Math.max(0,styleCount-1);
+styleChars=Math.max(0,styleChars-text.length);
 try{
 if(sheet){
 document.adoptedStyleSheets=document.adoptedStyleSheets.filter(function(s){return s!==sheet;});
@@ -135,10 +151,10 @@ setTimeout(resendCommands,3500);
 }catch(e){}
 }
 function registerCommand(name,fn){
-if(!isTop||typeof fn!=="function")return null;
+if(!isTop||typeof fn!=="function"||Object.keys(cmds).length>=32)return null;
 var cid=KEY+":"+(++cmdSeq);
 cmds[cid]=fn;
-cmdNames[cid]=String(name);
+cmdNames[cid]=String(name).substring(0,60);
 inv("cmd",cid,cmdNames[cid]);
 armCommandSync();
 return cid;
@@ -166,6 +182,22 @@ function xhr(o){
 o=o||{};
 var handle={abort:function(){}};
 var finished=false;
+var maxRequestBytes=2097152;
+var maxOptionsChars=3000000;
+if(!o.url||String(o.url).length>8192){
+setTimeout(function(){if(typeof o.onerror==="function")o.onerror({error:"invalid url",status:0,readyState:4});},0);
+return handle;
+}
+if(o.data!=null){
+if(typeof o.data==="string"&&o.data.length>maxRequestBytes){
+setTimeout(function(){if(typeof o.onerror==="function")o.onerror({error:"request body too large",status:0,readyState:4});},0);
+return handle;
+}
+if(o.data instanceof ArrayBuffer&&o.data.byteLength>maxRequestBytes||o.data&&o.data.buffer instanceof ArrayBuffer&&typeof o.data.byteLength==="number"&&o.data.byteLength>maxRequestBytes){
+setTimeout(function(){if(typeof o.onerror==="function")o.onerror({error:"request body too large",status:0,readyState:4});},0);
+return handle;
+}
+}
 function emit(name,payload){
 if(finished&&name!=="onabort")return;
 finished=true;
@@ -177,17 +209,52 @@ try{url=new URL(String(o.url),location.href).href;}catch(e){
 setTimeout(function(){emit("onerror",{error:"invalid url",status:0,readyState:4});},0);
 return handle;
 }
-var opts={url:url,method:o.method||"GET",headers:o.headers||{},responseType:o.responseType||"",timeout:o.timeout||0,anonymous:!!o.anonymous,user:o.user||"",password:o.password||"",origin:isTop?location.hostname:(function(){try{return location.hostname;}catch(e){return "";}})(),binary:!!o.binary,noRedirect:o.redirect==="manual"||o.redirect==="error"};
+var inputHeaders=o.headers&&typeof o.headers==="object"?o.headers:{};
+var headerKeys=Object.keys(inputHeaders);
+if(headerKeys.length>64){
+setTimeout(function(){if(typeof o.onerror==="function")o.onerror({error:"too many headers",status:0,readyState:4});},0);
+return handle;
+}
+var checkedHeaders=Object.create(null);
+var headerChars=0;
+for(var hi=0;hi<headerKeys.length;hi++){
+var hk=headerKeys[hi],hv=String(inputHeaders[hk]);
+if(hk.length>256||hv.length>8192||/[\r\n]/.test(hk)||/[\r\n]/.test(hv)||!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(hk)){
+setTimeout(function(){if(typeof o.onerror==="function")o.onerror({error:"invalid headers",status:0,readyState:4});},0);
+return handle;
+}
+headerChars+=hk.length+hv.length;
+if(headerChars>32768){
+setTimeout(function(){if(typeof o.onerror==="function")o.onerror({error:"headers too large",status:0,readyState:4});},0);
+return handle;
+}
+checkedHeaders[hk]=hv;
+}
+var opts={url:url,method:o.method||"GET",headers:checkedHeaders,responseType:o.responseType||"",timeout:o.timeout||0,anonymous:!!o.anonymous,user:o.user||"",password:o.password||"",origin:(function(){try{return location.origin||location.protocol+"//"+location.host;}catch(e){return "";}})(),binary:!!o.binary,noRedirect:o.redirect==="manual"||o.redirect==="error"};
 if(o.overrideMimeType&&/charset=([\w-]+)/i.test(o.overrideMimeType))opts.charset=RegExp.$1;
 var d=o.data;
 if(d!=null){
 if(typeof d==="string")opts.data=d;
 else if(typeof URLSearchParams!=="undefined"&&d instanceof URLSearchParams)opts.data=d.toString();
-else if(d instanceof ArrayBuffer||(d&&d.buffer instanceof ArrayBuffer&&typeof d.byteLength==="number"))opts.dataB64=toB64(d);
+else if(d instanceof ArrayBuffer||(d&&d.buffer instanceof ArrayBuffer&&typeof d.byteLength==="number")){
+var binaryLength=typeof d.byteLength==="number"?d.byteLength:0;
+if(binaryLength>maxRequestBytes){setTimeout(function(){if(typeof o.onerror==="function")o.onerror({error:"request body too large",status:0,readyState:4});},0);return handle;}
+opts.dataB64=toB64(d);
+}
 else opts.data=String(d);
+if((opts.data&&opts.data.length>maxRequestBytes)||(opts.dataB64&&opts.dataB64.length>2800000)){
+setTimeout(function(){if(typeof o.onerror==="function")o.onerror({error:"request body too large",status:0,readyState:4});},0);
+return handle;
+}
 }
 var rid=KEY+"x"+(++xseq)+Math.floor(Math.random()*1679616).toString(36);
-var ok=inv("xhr",rid,JSON.stringify(opts));
+var optsJson;
+try{optsJson=JSON.stringify(opts);}catch(e){optsJson="";}
+if(!optsJson||optsJson.length>maxOptionsChars){
+setTimeout(function(){emit("onerror",{error:"request options too large",status:0,readyState:4});},0);
+return handle;
+}
+var ok=inv("xhr",rid,optsJson);
 if(ok!=="1"){
 setTimeout(function(){emit("onerror",{error:"request rejected (permission/limit)",status:0,readyState:4});},0);
 return handle;

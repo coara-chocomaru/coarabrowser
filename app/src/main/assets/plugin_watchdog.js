@@ -15,6 +15,7 @@ function check(){
 var rs=window.__coaraPlgReady||{};
 var u="";
 try{u=String(location.href);}catch(e){}
+if(u.length>8192)return;
 for(var i=0;i<EXP.length;i++){
 var e=EXP[i];
 if(!e.allFrames&&!isTop)continue;
