@@ -1,9 +1,12 @@
 package com.coara.browser.util;
 
+import android.os.Handler;
+import android.os.Looper;
 import android.webkit.WebView;
 
 import org.json.JSONObject;
 
+import java.lang.ref.WeakReference;
 import java.util.Collections;
 import java.util.Map;
 import java.util.WeakHashMap;
@@ -16,6 +19,9 @@ public final class DesktopContentOptimizer {
     private static final int MAX_SCRIPT_CHARS = 16000;
     private static final Pattern CHROME_VERSION = Pattern.compile("Chrome/(\\d+)");
     private static final Map<WebView, Boolean> ACTIVE = Collections.synchronizedMap(new WeakHashMap<WebView, Boolean>());
+    private static final Map<WebView, Runnable> PENDING_URL_APPLIES = new WeakHashMap<>();
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    private static final long URL_APPLY_DELAY_MS = 160L;
     private static final String CSS = "*,*::before,*::after{box-sizing:border-box;}" +
             "html{width:100%;max-width:100%;}" +
             "body{max-width:100vw;min-width:0 !important;overflow-x:auto;-webkit-text-size-adjust:100%;}" +
@@ -43,9 +49,48 @@ public final class DesktopContentOptimizer {
         return "";
     }
 
+    public static void applyAfterUrlChange(WebView webView, boolean enabled) {
+        if (webView == null) {
+            return;
+        }
+        if (!enabled) {
+            apply(webView, false);
+            return;
+        }
+        synchronized (PENDING_URL_APPLIES) {
+            Runnable previous = PENDING_URL_APPLIES.remove(webView);
+            if (previous != null) {
+                MAIN.removeCallbacks(previous);
+            }
+            WeakReference<WebView> reference = new WeakReference<>(webView);
+            Runnable pending = new Runnable() {
+                @Override
+                public void run() {
+                    WebView target = reference.get();
+                    synchronized (PENDING_URL_APPLIES) {
+                        if (target != null && PENDING_URL_APPLIES.get(target) == this) {
+                            PENDING_URL_APPLIES.remove(target);
+                        }
+                    }
+                    if (target != null && target.getUrl() != null) {
+                        apply(target, true);
+                    }
+                }
+            };
+            PENDING_URL_APPLIES.put(webView, pending);
+            MAIN.postDelayed(pending, URL_APPLY_DELAY_MS);
+        }
+    }
+
     public static void apply(WebView webView, boolean enabled) {
         if (webView == null) {
             return;
+        }
+        synchronized (PENDING_URL_APPLIES) {
+            Runnable pending = PENDING_URL_APPLIES.remove(webView);
+            if (pending != null) {
+                MAIN.removeCallbacks(pending);
+            }
         }
         if (!enabled) {
             if (ACTIVE.remove(webView) != null) {
