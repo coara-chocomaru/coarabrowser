@@ -385,6 +385,59 @@ public class QrCodeActivity extends AppCompatActivity implements SurfaceHolder.C
         return content != null && (content.startsWith("http://") || content.startsWith("https://"));
     }
 
+    private static HttpURLConnection openTitleConnection(String address) throws IOException {
+        URL target = new URL(address);
+        for (int redirects = 0; redirects <= 5; redirects++) {
+            String protocol = target.getProtocol();
+            if (!("http".equalsIgnoreCase(protocol) || "https".equalsIgnoreCase(protocol))
+                    || target.getHost() == null || target.getHost().isEmpty() || target.getUserInfo() != null) {
+                return null;
+            }
+            HttpURLConnection current = (HttpURLConnection) target.openConnection();
+            current.setRequestMethod("GET");
+            current.setConnectTimeout(5000);
+            current.setReadTimeout(5000);
+            current.setInstanceFollowRedirects(false);
+            current.connect();
+            int status = current.getResponseCode();
+            if (status == HttpURLConnection.HTTP_MOVED_PERM || status == HttpURLConnection.HTTP_MOVED_TEMP
+                    || status == HttpURLConnection.HTTP_SEE_OTHER || status == 307 || status == 308) {
+                String location = current.getHeaderField("Location");
+                current.disconnect();
+                if (redirects >= 5 || location == null || location.trim().isEmpty()) {
+                    return null;
+                }
+                URL next = new URL(target, location.trim());
+                if ("https".equalsIgnoreCase(target.getProtocol())
+                        && "http".equalsIgnoreCase(next.getProtocol())) {
+                    return null;
+                }
+                target = next;
+                continue;
+            }
+            if (status < 200 || status >= 300) {
+                current.disconnect();
+                return null;
+            }
+            return current;
+        }
+        return null;
+    }
+
+    private static int indexOfIgnoreCase(String text, String target, int fromIndex) {
+        if (text == null || target == null || target.isEmpty()) {
+            return -1;
+        }
+        int start = Math.max(0, fromIndex);
+        int last = text.length() - target.length();
+        for (int i = start; i <= last; i++) {
+            if (text.regionMatches(true, i, target, 0, target.length())) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private class FetchTitleTask extends AsyncTask<String, Void, String> {
         private TextView textView;
         private String content;
@@ -401,27 +454,35 @@ public class QrCodeActivity extends AppCompatActivity implements SurfaceHolder.C
             HttpURLConnection connection = null;
             BufferedReader reader = null;
             try {
-                URL url = new URL(urlString);
-                connection = (HttpURLConnection) url.openConnection();
-                connection.setRequestMethod("GET");
-                connection.setConnectTimeout(5000);
-                connection.setReadTimeout(5000);
-                connection.connect();
-
+                connection = openTitleConnection(urlString);
+                if (connection == null) {
+                    return title;
+                }
+                int contentLength = connection.getContentLength();
+                if (contentLength > 1024 * 1024) {
+                    return title;
+                }
                 InputStream stream = connection.getInputStream();
-                reader = new BufferedReader(new InputStreamReader(stream));
-                StringBuilder buffer = new StringBuilder();
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    buffer.append(line.toLowerCase(Locale.ROOT)); 
+                reader = new BufferedReader(new InputStreamReader(stream, java.nio.charset.StandardCharsets.UTF_8));
+                StringBuilder buffer = new StringBuilder(Math.min(Math.max(contentLength, 0), 32768));
+                char[] chars = new char[8192];
+                int count;
+                while ((count = reader.read(chars)) != -1) {
+                    if (buffer.length() > 1024 * 1024 - count) {
+                        break;
+                    }
+                    buffer.append(chars, 0, count);
                 }
                 String html = buffer.toString();
-
-                int titleStart = html.indexOf("<title>");
+                int titleStart = indexOfIgnoreCase(html, "<title>", 0);
                 if (titleStart != -1) {
-                    int titleEnd = html.indexOf("</title>", titleStart);
+                    int contentStart = titleStart + 7;
+                    int titleEnd = indexOfIgnoreCase(html, "</title>", contentStart);
                     if (titleEnd != -1) {
-                        title = html.substring(titleStart + 7, titleEnd).trim();
+                        title = html.substring(contentStart, titleEnd).trim();
+                        if (title.length() > 4096) {
+                            title = title.substring(0, 4096);
+                        }
                     }
                 }
             } catch (IOException e) {

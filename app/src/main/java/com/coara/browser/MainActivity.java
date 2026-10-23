@@ -1300,25 +1300,9 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         tabSnapshots.clear();
     }
 
-    private static boolean isMemoryPressureLevel(int level) {
-        return level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE
-                || level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
-                || level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
-                || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND;
-    }
-
     @SuppressWarnings("deprecation")
     private void trimBrowserMemory(int level) {
-        boolean memoryPressure = isMemoryPressureLevel(level);
-        if (memoryPressure) {
-            boolean critical = level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND;
-            if (pluginManager != null) {
-                pluginManager.trimMemory(critical);
-            }
-            PluginRuntime.trimMemory(critical);
-            BrowserThemeManager.trimMemory(critical);
-        }
-        if (memoryPressure) {
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
             if (faviconCache != null) {
                 try {
                     faviconCache.trimToSize(Math.max(1, faviconCache.maxSize() / 2));
@@ -2123,7 +2107,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 }
                 final String targetUrl = request.getUrl().toString();
                 if (request.isForMainFrame()) {
-                    CacheModePolicy.applyTo(view, targetUrl);
+                    view.getSettings().setCacheMode(CacheModePolicy.determineForUrl(targetUrl));
                     SafeBrowsingSupport.recordNavigation(view, targetUrl);
                 }
                 ExternalDownloadTabTracker.onMainFrameNavigation(view, request.isForMainFrame(), request.hasGesture(), request.isRedirect(), targetUrl);
@@ -2136,7 +2120,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 if (url == null || url.isEmpty()) {
                     return false;
                 }
-                CacheModePolicy.applyTo(view, url);
+                view.getSettings().setCacheMode(CacheModePolicy.determineForUrl(url));
                 SafeBrowsingSupport.recordNavigation(view, url);
                 return BrowserUrlRouter.handleUrlLoading(MainActivity.this, view, url, true);
             }
@@ -2153,8 +2137,6 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 loadedPages.remove(view);
-                BrowserThemeManager.onPageStarted(view);
-                DesktopContentOptimizer.onPageStarted(view);
                 PageTranslator.onPageStarted(view);
                 SafeBrowsingSupport.recordNavigation(view, url);
                 ExternalDownloadTabTracker.onPageStarted(view, url);
@@ -2167,7 +2149,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 TouchpadController.onPageStarted(view);
                 SpaStateManager.getInstance().clearState(view);
                 clearPendingSpaHistory(view);
-                CacheModePolicy.applyTo(view, url);
+                view.getSettings().setCacheMode(CacheModePolicy.determineForUrl(url));
                 if (view == getCurrentWebView()) {
                     urlEditText.setText(url);
                     updatePullToRefreshState(view, url);
@@ -2208,17 +2190,23 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 BrowserThemeManager.applyToWebView(view, MainActivity.this);
                 DesktopContentOptimizer.apply(view, deskuaEnabled);
                 dirtyStateTabs.add(view);
-                if (WebViewOptimizationUtils.shouldInjectYoutubeLazyLoading(url)) {
+                if (url.startsWith("https://m.youtube.com") || url.startsWith("https://www.youtube.com")) {
                     UiThread.postDelayed(() -> injectLazyLoading(view), 200);
                 }
-                CacheModePolicy.applyTo(view, url);
+                view.getSettings().setCacheMode(CacheModePolicy.determineForUrl(url));
                 WebViewOptimizationUtils.injectSpaProbe(view);
                 final String capturedUrl = url;
                 UiThread.postDelayed(() -> {
                     try {
                         String cur = view.getUrl();
-                        if (cur != null && cur.equals(capturedUrl) && !SpaStateManager.getInstance().isSpa(view)) {
-                            WebViewOptimizationUtils.recheckSpaProbe(view);
+                        if (cur != null && cur.equals(capturedUrl)) {
+                            if (!SpaStateManager.getInstance().isSpa(view)) {
+                                WebViewOptimizationUtils.injectSpaProbe(view);
+                            }
+                            if (view == getCurrentWebView()) {
+                                DesktopContentOptimizer.apply(view, deskuaEnabled);
+                                BrowserThemeManager.applyToWebView(view, MainActivity.this);
+                            }
                         }
                     } catch (Exception ignored) {
                     }
@@ -4055,7 +4043,8 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                             updatePullToRefreshState(owner, owner.getUrl());
                             String currentUrl = owner.getUrl();
                             if (currentUrl != null) {
-                                CacheModePolicy.applyPostLoadTo(owner, currentUrl, isSpa);
+                                owner.getSettings().setCacheMode(
+                                        CacheModePolicy.determinePostLoad(currentUrl, isSpa));
                             }
                         }
                     } catch (Exception ignored) {}
@@ -5126,15 +5115,23 @@ private void recycleScreenshotBitmap(Bitmap bitmap) {
 
         @Override
         public void open(String url) {
+            String safeUrl = BookmarkStore.sanitizeBookmarkUrl(url);
             WebView current = getCurrentWebView();
-            if (current != null) {
-                current.loadUrl(url);
+            if (safeUrl != null && current != null) {
+                current.loadUrl(safeUrl);
+            } else if (safeUrl == null) {
+                Toast.makeText(MainActivity.this, "このURLはブックマークから開けません", Toast.LENGTH_SHORT).show();
             }
         }
 
         @Override
         public void openInNewTab(String url) {
-            createNewTab(url);
+            String safeUrl = BookmarkStore.sanitizeBookmarkUrl(url);
+            if (safeUrl != null) {
+                createNewTab(safeUrl);
+            } else {
+                Toast.makeText(MainActivity.this, "このURLはブックマークから開けません", Toast.LENGTH_SHORT).show();
+            }
         }
 
         @Override
@@ -5262,7 +5259,8 @@ private void recycleScreenshotBitmap(Bitmap bitmap) {
     private void addBookmark() {
         WebView current = getCurrentWebView();
         String currentUrl = current != null ? current.getUrl() : null;
-        if (currentUrl == null || currentUrl.isEmpty()) {
+        currentUrl = BookmarkStore.sanitizeBookmarkUrl(currentUrl);
+        if (currentUrl == null) {
             Toast.makeText(this, "追加できるページがありません", Toast.LENGTH_SHORT).show();
             return;
         }
@@ -5271,12 +5269,16 @@ private void recycleScreenshotBitmap(Bitmap bitmap) {
             BookmarkDialog.showEditor(this, bookmarks, existing, bookmarkHost, null);
             return;
         }
+        if (bookmarks.size() >= BookmarkStore.MAX_SAVED_BOOKMARKS) {
+            Toast.makeText(this, "ブックマークは最大件数に達しています", Toast.LENGTH_SHORT).show();
+            return;
+        }
         String title = current.getTitle();
         if (title == null || title.trim().isEmpty()) {
             title = BookmarkStore.hostOf(currentUrl);
         }
         final String defaultFolder = BookmarkStore.getDefaultFolder(this);
-        final Bookmark added = new Bookmark(title.trim(), currentUrl, defaultFolder);
+        final Bookmark added = new Bookmark(BookmarkStore.sanitizeBookmarkTitle(title), currentUrl, defaultFolder);
         bookmarks.add(added);
         saveBookmarks();
         prefetchFavicons(java.util.Collections.singletonList(added));
@@ -5336,7 +5338,7 @@ private void recycleScreenshotBitmap(Bitmap bitmap) {
         String jsonStr = pref.getString(KEY_BOOKMARKS, "[]");
         if (jsonStr != null && !jsonStr.isEmpty()) {
             try {
-                bookmarks.addAll(BookmarkStore.parseJson(jsonStr));
+                bookmarks.addAll(BookmarkStore.parseStoredJson(jsonStr));
             } catch (JSONException e) {
                 e.printStackTrace();
             }
@@ -5376,6 +5378,9 @@ private void recycleScreenshotBitmap(Bitmap bitmap) {
             List<Bookmark> incoming = BookmarkStore.looksLikeHtml(text)
                 ? BookmarkStore.parseNetscapeHtml(text)
                 : BookmarkStore.parseJson(text);
+            if (incoming.size() > BookmarkStore.MAX_IMPORT_BOOKMARKS) {
+                throw new IOException("ブックマーク件数が上限を超えています");
+            }
             if (incoming.isEmpty()) {
                 Toast.makeText(MainActivity.this, "取り込めるブックマークがありません", Toast.LENGTH_SHORT).show();
                 return;
@@ -5414,16 +5419,12 @@ private void recycleScreenshotBitmap(Bitmap bitmap) {
             .show();
     }
     private String readTextFromUri(Uri uri) throws IOException {
-    StringBuilder builder = new StringBuilder();
-    try (InputStream inputStream = getContentResolver().openInputStream(uri);
-         BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream))) {
-        String line;
-        while ((line = reader.readLine()) != null) {
-            builder.append(line);
-          }
-       }
-       return builder.toString();
-      }
+        if (uri == null) {
+            throw new IOException("ファイルが指定されていません");
+        }
+        InputStream inputStream = getContentResolver().openInputStream(uri);
+        return com.coara.browser.util.TextFileReader.readAll(inputStream, BookmarkStore.MAX_IMPORT_CHARS);
+    }
     private void saveBookmarks() {
         bookmarkKeyCache = null;
         pref.edit().putString(KEY_BOOKMARKS, BookmarkStore.toJson(bookmarks)).apply();
@@ -5595,10 +5596,10 @@ private void addHistory(String url, String title) {
 
     private void saveCookiesForTab(final int id, final String url) {
         try {
-            if (id == -1 || url == null || CookieSitePolicy.isBlockAllActive()) return;
+            if (id == -1 || !BridgeGuard.isWebPage(url) || CookieSitePolicy.isBlockAllActive()) return;
             final CookieManager cm = CookieManager.getInstance();
             final String cookie = cm.getCookie(url);
-            if (cookie == null) return;
+            if (cookie == null || cookie.length() > 256 * 1024) return;
             backgroundExecutor.execute(() -> {
                 try {
                     File out = new File(getFilesDir(), "tab_cookies_" + id + ".txt");
@@ -5616,14 +5617,17 @@ private void addHistory(String url, String title) {
 
     private void restoreCookiesForTab(final int id, final String url) {
         try {
-            if (id == -1 || url == null || CookieSitePolicy.isBlockAllActive()) return;
+            if (id == -1 || !BridgeGuard.isWebPage(url) || CookieSitePolicy.isBlockAllActive()) return;
             File in = new File(getFilesDir(), "tab_cookies_" + id + ".txt");
-            if (!in.exists()) return;
+            if (!in.isFile()) return;
+            long length = in.length();
+            if (length <= 0L || length > 256L * 1024L) {
+                safeDeleteFile(in);
+                return;
+            }
             String cookie = null;
             try (FileInputStream fis = new FileInputStream(in)) {
-                byte[] data = new byte[(int) in.length()];
-                int r = fis.read(data);
-                if (r > 0) cookie = new String(data, "UTF-8");
+                cookie = com.coara.browser.util.TextFileReader.readAll(fis, 256 * 1024);
             } catch (Exception e) {
                 e.printStackTrace();
             }

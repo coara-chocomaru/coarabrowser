@@ -82,7 +82,6 @@ import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.textfield.TextInputEditText;
 import com.coara.browser.util.BasicAuthManager;
-import com.coara.browser.util.BrowserThemeManager;
 import com.coara.browser.util.CookieSitePolicy;
 import com.coara.browser.util.ExternalDownloadTabTracker;
 import com.coara.browser.util.DownloadSupport;
@@ -93,6 +92,7 @@ import com.coara.browser.util.PageTranslator;
 import com.coara.browser.util.TranslateSettingsDialog;
 import com.coara.browser.util.BrowserUrlRouter;
 import com.coara.browser.util.BrowserAssetLoader;
+import com.coara.browser.util.BookmarkStore;
 import com.coara.browser.webview.WebViewOptimizationUtils;
 import com.coara.browser.webview.KeyboardGameWebView;
 import com.coara.browser.webview.BlobDownloadBridge;
@@ -643,32 +643,16 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         handleIntent(intent);
     }
 
-    private static boolean isMemoryPressureLevel(int level) {
-        return level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE
-                || level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
-                || level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
-                || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND;
-    }
-
     @Override
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
-        boolean memoryPressure = isMemoryPressureLevel(level);
-        if (memoryPressure) {
-            boolean critical = level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND;
-            if (pluginManager != null) {
-                pluginManager.trimMemory(critical);
-            }
-            PluginRuntime.trimMemory(critical);
-            BrowserThemeManager.trimMemory(critical);
-        }
-        if (memoryPressure && faviconCache != null) {
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW && faviconCache != null) {
             try {
                 faviconCache.trimToSize(Math.max(1, faviconCache.maxSize() / 2));
             } catch (Exception ignored) {
             }
         }
-        if ((level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) && faviconCache != null) {
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL && faviconCache != null) {
             try {
                 faviconCache.evictAll();
             } catch (Exception ignored) {
@@ -1143,7 +1127,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
                 installDownloadHintScript(view);
                   super.onPageFinished(view, url);
                 PageTranslator.onPageFinished(view, false);
-            if (WebViewOptimizationUtils.shouldInjectSecretLazyLoading(url)) {
+            if (url.startsWith("https://m.youtube.com") || url.startsWith("https://chatgpt.com/")) {
                 UiThread.postDelayed(() -> injectLazyLoading(view), 200);
             }
             if (url.equals(START_PAGE)) {
@@ -2695,10 +2679,11 @@ private void saveScreenshot(Bitmap bitmap) {
             .setTitle("ブックマーク")
             .setView(editView)
             .setPositiveButton("保存", (dialog, which) -> {
-                String newTitle = etTitle.getText().toString().trim();
-                String newUrl = etUrl.getText().toString().trim();
-                if (!newUrl.startsWith("http://") && !newUrl.startsWith("https://")) {
-                    newUrl = "http://" + newUrl;
+                String newTitle = BookmarkStore.sanitizeBookmarkTitle(etTitle.getText().toString());
+                String newUrl = BookmarkStore.sanitizeBookmarkUrl(BrowserUrlRouter.normalizeUserInput(etUrl.getText().toString().trim()));
+                if (newUrl == null) {
+                    Toast.makeText(SecretActivity.this, "HTTPまたはHTTPSのURLを入力してください", Toast.LENGTH_SHORT).show();
+                    return;
                 }
                 bookmarks.set(position, new Bookmark(newTitle, newUrl));
                 saveBookmarks();
@@ -2710,12 +2695,20 @@ private void saveScreenshot(Bitmap bitmap) {
     }
 
     private void addBookmark() {
-        String currentUrl = getCurrentWebView().getUrl();
-        String title = getCurrentWebView().getTitle();
-        if (currentUrl != null && !currentUrl.isEmpty()) {
+        WebView current = getCurrentWebView();
+        if (current == null) return;
+        String currentUrl = BookmarkStore.sanitizeBookmarkUrl(current.getUrl());
+        String title = BookmarkStore.sanitizeBookmarkTitle(current.getTitle());
+        if (currentUrl != null && bookmarks.size() >= BookmarkStore.MAX_SAVED_BOOKMARKS) {
+            Toast.makeText(SecretActivity.this, "ブックマークは最大件数に達しています", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (currentUrl != null) {
             bookmarks.add(new Bookmark(title, currentUrl));
             saveBookmarks();
             Toast.makeText(SecretActivity.this, "ブックマークを追加しました", Toast.LENGTH_SHORT).show();
+        } else {
+            Toast.makeText(SecretActivity.this, "このページはブックマークできません", Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -2768,44 +2761,63 @@ private void saveScreenshot(Bitmap bitmap) {
       }
     }
     private String readTextFromUri(Uri uri) throws IOException {
-    StringBuilder builder = new StringBuilder();
-    try (InputStream inputStream = getContentResolver().openInputStream(uri);
-         BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream))) {
-        String line;
-        while ((line = reader.readLine()) != null) {
-            builder.append(line);
-          }
-       }
-       return builder.toString();
-      }
-    private void parseAndImportBookmarks(String jsonStr) throws JSONException {
-        JSONArray array = new JSONArray(jsonStr);
-        bookmarks.clear();
-        for (int i = 0; i < array.length(); i++) {
-            JSONObject obj = array.getJSONObject(i);
-            String title = obj.optString("title", "Untitled");
-            String url = obj.optString("url", "");
-            if (!url.isEmpty()) {
-                bookmarks.add(new Bookmark(title, url));
-                backgroundExecutor.execute(() -> {
-                    Bitmap favicon = fetchFavicon(url);
-                    if (favicon != null) {
-                        runOnUiThread(() -> faviconCache.put(url, favicon));
-                    }
-                });
-            }
+        if (uri == null) {
+            throw new IOException("ファイルが指定されていません");
         }
+        InputStream inputStream = getContentResolver().openInputStream(uri);
+        return com.coara.browser.util.TextFileReader.readAll(inputStream, BookmarkStore.MAX_IMPORT_CHARS);
+    }
+
+    private void parseAndImportBookmarks(String jsonStr) throws JSONException {
+        if (jsonStr == null || jsonStr.length() > BookmarkStore.MAX_IMPORT_CHARS) {
+            throw new JSONException("入力データが上限を超えています");
+        }
+        JSONArray array = new JSONArray(jsonStr);
+        if (array.length() > BookmarkStore.MAX_IMPORT_BOOKMARKS) {
+            throw new JSONException("ブックマーク件数が上限を超えています");
+        }
+        ArrayList<Bookmark> imported = new ArrayList<>(Math.min(array.length(), BookmarkStore.MAX_IMPORT_BOOKMARKS));
+        ArrayList<String> faviconUrls = new ArrayList<>(50);
+        for (int i = 0; i < array.length(); i++) {
+            JSONObject obj = array.optJSONObject(i);
+            if (obj == null) continue;
+            String title = obj.optString("title", "Untitled");
+            title = BookmarkStore.sanitizeBookmarkTitle(title);
+            String url = BookmarkStore.sanitizeBookmarkUrl(obj.optString("url", ""));
+            if (url == null) continue;
+            imported.add(new Bookmark(title, url));
+            if (faviconUrls.size() < 50) faviconUrls.add(url);
+        }
+        if (imported.isEmpty()) {
+            throw new JSONException("有効なブックマークがありません");
+        }
+        bookmarks.clear();
+        bookmarks.addAll(imported);
         saveBookmarks();
+        for (String url : faviconUrls) {
+            backgroundExecutor.execute(() -> {
+                Bitmap favicon = fetchFavicon(url);
+                if (favicon != null) {
+                    runOnUiThread(() -> faviconCache.put(url, favicon));
+                }
+            });
+        }
     }
 
     private void parseAndAddBookmarks(String jsonStr) {
+        if (jsonStr == null || jsonStr.length() > BookmarkStore.MAX_STORED_BOOKMARK_CHARS) {
+            return;
+        }
         try {
             JSONArray array = new JSONArray(jsonStr);
-            for (int i = 0; i < array.length(); i++) {
-                JSONObject obj = array.getJSONObject(i);
+            int limit = Math.min(array.length(), BookmarkStore.MAX_SAVED_BOOKMARKS);
+            for (int i = 0; i < limit; i++) {
+                JSONObject obj = array.optJSONObject(i);
+                if (obj == null) continue;
                 String title = obj.optString("title", "Untitled");
-                String url = obj.optString("url", "");
-                if (!url.isEmpty()) {
+                title = BookmarkStore.sanitizeBookmarkTitle(title);
+                String url = BookmarkStore.sanitizeBookmarkUrl(obj.optString("url", ""));
+                if (url != null) {
                     bookmarks.add(new Bookmark(title, url));
                 }
             }
@@ -2917,8 +2929,14 @@ private void addHistory(String url, String title) {
                 holder.favicon.setImageResource(R.drawable.transparent_vector);
             }
             holder.itemView.setOnClickListener(v -> {
-                getCurrentWebView().loadUrl(bm.getUrl());
-                dialog.dismiss();
+                String safeUrl = BookmarkStore.sanitizeBookmarkUrl(bm.getUrl());
+                WebView current = getCurrentWebView();
+                if (safeUrl != null && current != null) {
+                    current.loadUrl(safeUrl);
+                    dialog.dismiss();
+                } else {
+                    Toast.makeText(SecretActivity.this, "このURLはブックマークから開けません", Toast.LENGTH_SHORT).show();
+                }
             });
             if (managementMode) {
             holder.itemView.setOnLongClickListener(v -> {
