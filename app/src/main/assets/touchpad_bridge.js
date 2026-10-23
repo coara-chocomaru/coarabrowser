@@ -29,14 +29,65 @@
         return v < lo ? lo : v > hi ? hi : v;
     }
 
-    function host(kind, a, b) {
+    var pendingHoverMotion = false;
+    var pendingHoverA = 0;
+    var pendingHoverB = 0;
+    var pendingTouchMoveMotion = false;
+    var pendingTouchMoveA = 0;
+    var pendingTouchMoveB = 0;
+    var pendingHostFrame = false;
+
+    function sendHost(kind, a, b) {
         try {
+            if (window.CoaraNativeBridge && typeof window.CoaraNativeBridge.postMessage === "function") {
+                window.CoaraNativeBridge.postMessage(JSON.stringify({type:"touchpad",kind:kind,a:a,b:b}));
+                return true;
+            }
             if (window.AndroidBridge && typeof window.AndroidBridge.touchpadNative === "function") {
                 window.AndroidBridge.touchpadNative(kind, a, b, window.__coaraNativeBridgeToken);
                 return true;
             }
         } catch (e) {}
         return false;
+    }
+
+    function drainHostMotion() {
+        var hasHover = pendingHoverMotion;
+        var hasTouchMove = pendingTouchMoveMotion;
+        pendingHoverMotion = false;
+        pendingTouchMoveMotion = false;
+        if (hasHover) sendHost(1, pendingHoverA, pendingHoverB);
+        if (hasTouchMove) sendHost(3, pendingTouchMoveA, pendingTouchMoveB);
+    }
+
+    function flushHostMotion() {
+        pendingHostFrame = false;
+        drainHostMotion();
+    }
+
+    function host(kind, a, b) {
+        if (kind === 1 || kind === 3) {
+            if (kind === 1) {
+                pendingHoverMotion = true;
+                pendingHoverA = a;
+                pendingHoverB = b;
+            } else {
+                pendingTouchMoveMotion = true;
+                pendingTouchMoveA = a;
+                pendingTouchMoveB = b;
+            }
+            if (!pendingHostFrame) {
+                pendingHostFrame = true;
+                if (window.requestAnimationFrame) {
+                    window.requestAnimationFrame(flushHostMotion);
+                } else {
+                    window.setTimeout(flushHostMotion, 16);
+                }
+            }
+            return true;
+        }
+        drainHostMotion();
+        return sendHost(kind, a, b);
     }
 
     function hostPos(kind) {
