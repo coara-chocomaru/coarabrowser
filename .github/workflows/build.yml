@@ -3,111 +3,77 @@ on:
   push:
     branches:
       - v4.4.4-4
+      
   pull_request:
     branches:
       - v4.4.4-4
 permissions:
   contents: read
+
 jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    env:
-      RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-      RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
-      RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-      RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
+          distribution: 'temurin'
           java-version: 21
-      - name: Grant Gradle wrapper execute permission
+          
+      - name: chmod +x
         run: chmod +x ./gradlew
+        
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
+
       - name: Set variables
-        id: meta
-        shell: bash
         run: |
-          version=$(sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/v\1/p' app/build.gradle | head -n1)
-          commit="${GITHUB_SHA:0:7}"
-          repo="${GITHUB_REPOSITORY##*/}"
-          timestamp=$(TZ='Asia/Tokyo' date +'%Y%m%d%H%M%S')
-          name="${repo}-${version}-${commit}-${timestamp}"
-          if [[ -n "${RELEASE_KEYSTORE_BASE64:-}" && -n "${RELEASE_KEYSTORE_PASSWORD:-}" && -n "${RELEASE_KEY_ALIAS:-}" && -n "${RELEASE_KEY_PASSWORD:-}" ]]; then
-            artifact_name="$name"
-          else
-            artifact_name="${name}-UNSIGNED"
-          fi
           {
-            echo "VERSION=$version"
-            echo "COMMIT=$commit"
-            echo "REPO=$repo"
-            echo "TIMESTAMP=$timestamp"
-            echo "NAME=$name"
-            echo "ARTIFACT_NAME=$artifact_name"
-          } >> "$GITHUB_ENV"
-          {
-            echo "version=$version"
-            echo "commit=$commit"
-            echo "repo=$repo"
-            echo "timestamp=$timestamp"
-            echo "name=$name"
-            echo "artifact_name=$artifact_name"
-          } >> "$GITHUB_OUTPUT"
+            echo "version=v$(grep versionName app/build.gradle | awk -F\" '{print $2}')"
+            echo "commit=$(echo ${{ github.sha }} | cut -c-7)"
+            echo "repo=$(echo ${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/})"
+            echo "timestamp=$(TZ='Asia/Tokyo' date +'%Y%m%d%H%M%S')"
+            echo "name=${repo}-${version}-${commit}-${timestamp}"
+          } >> $GITHUB_ENV
+
       - name: Show set variables
         run: |
-          printf 'version=%s\n' "$VERSION"
-          printf 'commit=%s\n' "$COMMIT"
-          printf 'repo=%s\n' "$REPO"
-          printf 'timestamp=%s\n' "$TIMESTAMP"
-      - name: Prepare release signing key
-        if: ${{ env.RELEASE_KEYSTORE_BASE64 != '' && env.RELEASE_KEYSTORE_PASSWORD != '' && env.RELEASE_KEY_ALIAS != '' && env.RELEASE_KEY_PASSWORD != '' }}
-        shell: bash
-        run: |
-          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/coara-release.jks"
-          chmod 600 "$RUNNER_TEMP/coara-release.jks"
-          echo "RELEASE_KEYSTORE_PATH=$RUNNER_TEMP/coara-release.jks" >> "$GITHUB_ENV"
+          echo "name=${{ env.repo }}-${{ env.version }}-${{ env.commit }}-${{ env.timestamp }}" >> $GITHUB_ENV
+          echo -e "version=${{ env.version }}"
+          echo -e "commit=${{ env.commit }}"
+          echo -e "repo=${{ env.repo }}"
+          echo -e "timestamp=${{ env.timestamp }}"
+
       - name: Build
-        shell: bash
         run: |
           ./gradlew --no-daemon --stacktrace --warning-mode=all assembleRelease
-          ARM64_APK=$(find app/build/outputs/apk/release -maxdepth 1 -type f -name 'app-arm64-v8a-release*.apk' -print -quit)
-          ARMV7_APK=$(find app/build/outputs/apk/release -maxdepth 1 -type f -name 'app-armeabi-v7a-release*.apk' -print -quit)
-          test -n "$ARM64_APK"
-          test -n "$ARMV7_APK"
-          mv -vf "$ARM64_APK" "${ARTIFACT_NAME}-arm64-v8a.apk"
-          mv -vf "$ARMV7_APK" "${ARTIFACT_NAME}-armeabi-v7a.apk"
+          mv -vf app/build/outputs/apk/release/app-arm64-v8a-release.apk "${{ env.name }}-arm64-v8a.apk"
+          mv -vf app/build/outputs/apk/release/app-armeabi-v7a-release.apk "${{ env.name }}-armeabi-v7a.apk"
           ./gradlew --no-daemon --stacktrace --warning-mode=all -PbundleBuild=true bundleRelease
-          mv -vf app/build/outputs/bundle/release/app-release.aab "${ARTIFACT_NAME}.aab"
+          mv -vf app/build/outputs/bundle/release/app-release.aab "${{ env.name }}.aab"
+
       - name: Build APKS
-        if: ${{ env.RELEASE_KEYSTORE_BASE64 != '' && env.RELEASE_KEYSTORE_PASSWORD != '' && env.RELEASE_KEY_ALIAS != '' && env.RELEASE_KEY_PASSWORD != '' }}
-        shell: bash
         run: |
-          curl -fsSL -o bundletool.jar https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar
+          curl -fsSL -o bundletool.jar https://github.com/google/bundletool/releases/download/1.18.1/bundletool-all-1.18.1.jar
           java -jar bundletool.jar build-apks \
-            --bundle="${ARTIFACT_NAME}.aab" \
-            --output="${ARTIFACT_NAME}.apks" \
-            --ks="$RELEASE_KEYSTORE_PATH" \
-            --ks-pass="pass:$RELEASE_KEYSTORE_PASSWORD" \
-            --ks-key-alias="$RELEASE_KEY_ALIAS" \
-            --key-pass="pass:$RELEASE_KEY_PASSWORD"
+            --bundle="${{ env.name }}.aab" \
+            --output="${{ env.name }}.apks" \
+            --ks=app/test.jks \
+            --ks-pass=pass:test1234 \
+            --ks-key-alias=key0 \
+            --key-pass=pass:test1234
           rm -f bundletool.jar
-      - name: Remove signing key
-        if: always()
-        shell: bash
-        run: rm -f "$RUNNER_TEMP/coara-release.jks"
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.meta.outputs.artifact_name }}
+          name: "${{ env.name }}"
           path: |
-            ${{ steps.meta.outputs.artifact_name }}-arm64-v8a.apk
-            ${{ steps.meta.outputs.artifact_name }}-armeabi-v7a.apk
-            ${{ steps.meta.outputs.artifact_name }}.aab
-            ${{ steps.meta.outputs.artifact_name }}.apks
-          if-no-files-found: warn
+            ${{ env.name }}-arm64-v8a.apk
+            ${{ env.name }}-armeabi-v7a.apk
+            ${{ env.name }}.aab
+            ${{ env.name }}.apks
