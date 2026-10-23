@@ -18,6 +18,7 @@ try{u=String(location.href);}catch(e){}
 if(u.length>8192)return;
 for(var i=0;i<EXP.length;i++){
 var e=EXP[i];
+if(rs[e.key])continue;
 if(!e.allFrames&&!isTop)continue;
 if(e.excludes.length&&rx(e.excludes,u))continue;
 if(!rx(e.matches,u))continue;
