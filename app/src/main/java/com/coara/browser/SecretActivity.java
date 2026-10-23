@@ -97,6 +97,7 @@ import com.coara.browser.webview.WebViewOptimizationUtils;
 import com.coara.browser.webview.KeyboardGameWebView;
 import com.coara.browser.webview.BlobDownloadBridge;
 import com.coara.browser.webview.BridgeGuard;
+import com.coara.browser.webview.NativeMessageBridge;
 import com.coara.browser.util.UiThread;
 import com.coara.browser.util.HistoryDialog;
 import com.coara.browser.model.HistoryItem;
@@ -825,9 +826,11 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         KeyboardSettings.configureWebView(webView, pref);
         webView.setScrollBarStyle(View.SCROLLBARS_INSIDE_OVERLAY);
         webView.setBackgroundColor(Color.WHITE);
-        AndroidBridge androidBridge = new AndroidBridge(webView);
-        webView.addJavascriptInterface(androidBridge, "AndroidBridge");
-        com.coara.browser.webview.WebViewOptimizationUtils.installNativeBridgeToken(webView, androidBridge.getBridgeToken());
+        if (!NativeMessageBridge.attach(webView, this::handleNativeBridgeMessage)) {
+            AndroidBridge androidBridge = new AndroidBridge(webView);
+            webView.addJavascriptInterface(androidBridge, "AndroidBridge");
+            com.coara.browser.webview.WebViewOptimizationUtils.installNativeBridgeToken(webView, androidBridge.getBridgeToken());
+        }
         webView.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -1150,11 +1153,12 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
           "if(!window.__coaraHistoryHooked){" +
           "window.__coaraHistoryHooked=true;" +
           "window.__coaraLastHref=location.href;" +
+          "var sendNativeUrl=function(href){try{if(window.CoaraNativeBridge&&typeof window.CoaraNativeBridge.postMessage==='function'){window.CoaraNativeBridge.postMessage(JSON.stringify({type:'url',url:href}));return;}}catch(e){}try{AndroidBridge.onUrlChange(href,window.__coaraNativeBridgeToken);}catch(e){}};" +
           "var notifyUrlChange=function(force){" +
           "var href=location.href;" +
           "if(!force&&href===window.__coaraLastHref)return;" +
           "window.__coaraLastHref=href;" +
-          "try{AndroidBridge.onUrlChange(href,window.__coaraNativeBridgeToken);}catch(ex){}" +
+          "sendNativeUrl(href);" +
           "};" +
           "var pushState=history.pushState;" +
           "history.pushState=function(){var r=pushState.apply(history,arguments);notifyUrlChange(true);return r;};" +
@@ -1164,7 +1168,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
           "window.addEventListener('hashchange',function(){notifyUrlChange(true);});" +
           "notifyUrlChange(true);" +
           "}else{" +
-          "try{AndroidBridge.onUrlChange(location.href,window.__coaraNativeBridgeToken);}catch(ex2){}" +
+          "sendNativeUrl(location.href);" +
           "}" +
           "}catch(e){}" +
           "})();"; 
@@ -1996,6 +2000,51 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         current.loadUrl(url);
     }
 
+    private void handleNativeBridgeMessage(WebView owner, JSONObject message) {
+        if (owner == null || message == null || !BridgeGuard.isWebPage(owner.getUrl())) {
+            return;
+        }
+        String type = message.optString("type", "");
+        if ("touchpad".equals(type)) {
+            if (owner != getCurrentWebView()) {
+                return;
+            }
+            int kind = message.optInt("kind", -1);
+            double a = message.optDouble("a", Double.NaN);
+            double b = message.optDouble("b", Double.NaN);
+            if (Double.isFinite(a) && Double.isFinite(b)) {
+                TouchpadController.postHostRequest(owner, kind, (float) a, (float) b);
+            }
+            return;
+        }
+        if ("pointerlock".equals(type)) {
+            boolean locked = message.optBoolean("locked", false);
+            UiThread.post(() -> {
+                try {
+                    if (owner == getCurrentWebView() && BridgeGuard.isWebPage(owner.getUrl())) {
+                        TouchpadController.setPointerLocked(owner, locked);
+                    }
+                } catch (Exception ignored) {
+                }
+            });
+            return;
+        }
+        if ("url".equals(type)) {
+            String url = message.optString("url", "");
+            if (url.length() > 4096 || !BridgeGuard.acceptReportedUrl(owner.getUrl(), url)) {
+                return;
+            }
+            UiThread.post(() -> {
+                try {
+                    if (owner != getCurrentWebView() || !BridgeGuard.acceptReportedUrl(owner.getUrl(), url)) {
+                        return;
+                    }
+                    scheduleSpaHistoryUpdate(owner, url);
+                } catch (Exception ignored) {
+                }
+            });
+        }
+    }
 private class AndroidBridge {
     private final WebView owner;
     private final String bridgeToken = java.util.UUID.randomUUID().toString().replace("-", "")
@@ -2010,14 +2059,16 @@ private class AndroidBridge {
     }
 
     private boolean isAuthorized(String candidate) {
-        return candidate != null && java.security.MessageDigest.isEqual(
+        return candidate != null && candidate.length() == bridgeToken.length()
+                && java.security.MessageDigest.isEqual(
                 bridgeToken.getBytes(java.nio.charset.StandardCharsets.UTF_8),
                 candidate.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     @JavascriptInterface
     public void touchpadNative(final int kind, final float a, final float b, final String token) {
-        if (!isAuthorized(token) || owner != getCurrentWebView() || !BridgeGuard.isWebPage(owner.getUrl())) {
+        if (!isAuthorized(token) || owner != getCurrentWebView() || !BridgeGuard.isWebPage(owner.getUrl())
+                || !NativeMessageBridge.isValidTouchpadRequest(kind, a, b)) {
             return;
         }
         TouchpadController.postHostRequest(owner, kind, a, b);
