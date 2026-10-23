@@ -1300,9 +1300,25 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         tabSnapshots.clear();
     }
 
+    private static boolean isMemoryPressureLevel(int level) {
+        return level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE
+                || level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
+                || level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
+                || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND;
+    }
+
     @SuppressWarnings("deprecation")
     private void trimBrowserMemory(int level) {
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+        boolean memoryPressure = isMemoryPressureLevel(level);
+        if (memoryPressure) {
+            boolean critical = level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND;
+            if (pluginManager != null) {
+                pluginManager.trimMemory(critical);
+            }
+            PluginRuntime.trimMemory(critical);
+            BrowserThemeManager.trimMemory(critical);
+        }
+        if (memoryPressure) {
             if (faviconCache != null) {
                 try {
                     faviconCache.trimToSize(Math.max(1, faviconCache.maxSize() / 2));
@@ -2107,7 +2123,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 }
                 final String targetUrl = request.getUrl().toString();
                 if (request.isForMainFrame()) {
-                    view.getSettings().setCacheMode(CacheModePolicy.determineForUrl(targetUrl));
+                    CacheModePolicy.applyTo(view, targetUrl);
                     SafeBrowsingSupport.recordNavigation(view, targetUrl);
                 }
                 ExternalDownloadTabTracker.onMainFrameNavigation(view, request.isForMainFrame(), request.hasGesture(), request.isRedirect(), targetUrl);
@@ -2120,7 +2136,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 if (url == null || url.isEmpty()) {
                     return false;
                 }
-                view.getSettings().setCacheMode(CacheModePolicy.determineForUrl(url));
+                CacheModePolicy.applyTo(view, url);
                 SafeBrowsingSupport.recordNavigation(view, url);
                 return BrowserUrlRouter.handleUrlLoading(MainActivity.this, view, url, true);
             }
@@ -2137,6 +2153,8 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 loadedPages.remove(view);
+                BrowserThemeManager.onPageStarted(view);
+                DesktopContentOptimizer.onPageStarted(view);
                 PageTranslator.onPageStarted(view);
                 SafeBrowsingSupport.recordNavigation(view, url);
                 ExternalDownloadTabTracker.onPageStarted(view, url);
@@ -2149,7 +2167,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 TouchpadController.onPageStarted(view);
                 SpaStateManager.getInstance().clearState(view);
                 clearPendingSpaHistory(view);
-                view.getSettings().setCacheMode(CacheModePolicy.determineForUrl(url));
+                CacheModePolicy.applyTo(view, url);
                 if (view == getCurrentWebView()) {
                     urlEditText.setText(url);
                     updatePullToRefreshState(view, url);
@@ -2190,23 +2208,17 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                 BrowserThemeManager.applyToWebView(view, MainActivity.this);
                 DesktopContentOptimizer.apply(view, deskuaEnabled);
                 dirtyStateTabs.add(view);
-                if (url.startsWith("https://m.youtube.com") || url.startsWith("https://www.youtube.com")) {
+                if (WebViewOptimizationUtils.shouldInjectYoutubeLazyLoading(url)) {
                     UiThread.postDelayed(() -> injectLazyLoading(view), 200);
                 }
-                view.getSettings().setCacheMode(CacheModePolicy.determineForUrl(url));
+                CacheModePolicy.applyTo(view, url);
                 WebViewOptimizationUtils.injectSpaProbe(view);
                 final String capturedUrl = url;
                 UiThread.postDelayed(() -> {
                     try {
                         String cur = view.getUrl();
-                        if (cur != null && cur.equals(capturedUrl)) {
-                            if (!SpaStateManager.getInstance().isSpa(view)) {
-                                WebViewOptimizationUtils.injectSpaProbe(view);
-                            }
-                            if (view == getCurrentWebView()) {
-                                DesktopContentOptimizer.apply(view, deskuaEnabled);
-                                BrowserThemeManager.applyToWebView(view, MainActivity.this);
-                            }
+                        if (cur != null && cur.equals(capturedUrl) && !SpaStateManager.getInstance().isSpa(view)) {
+                            WebViewOptimizationUtils.recheckSpaProbe(view);
                         }
                     } catch (Exception ignored) {
                     }
@@ -4043,8 +4055,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                             updatePullToRefreshState(owner, owner.getUrl());
                             String currentUrl = owner.getUrl();
                             if (currentUrl != null) {
-                                owner.getSettings().setCacheMode(
-                                        CacheModePolicy.determinePostLoad(currentUrl, isSpa));
+                                CacheModePolicy.applyPostLoadTo(owner, currentUrl, isSpa);
                             }
                         }
                     } catch (Exception ignored) {}

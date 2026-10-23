@@ -82,6 +82,7 @@ import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.textfield.TextInputEditText;
 import com.coara.browser.util.BasicAuthManager;
+import com.coara.browser.util.BrowserThemeManager;
 import com.coara.browser.util.CookieSitePolicy;
 import com.coara.browser.util.ExternalDownloadTabTracker;
 import com.coara.browser.util.DownloadSupport;
@@ -642,16 +643,32 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         handleIntent(intent);
     }
 
+    private static boolean isMemoryPressureLevel(int level) {
+        return level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE
+                || level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
+                || level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
+                || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND;
+    }
+
     @Override
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW && faviconCache != null) {
+        boolean memoryPressure = isMemoryPressureLevel(level);
+        if (memoryPressure) {
+            boolean critical = level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND;
+            if (pluginManager != null) {
+                pluginManager.trimMemory(critical);
+            }
+            PluginRuntime.trimMemory(critical);
+            BrowserThemeManager.trimMemory(critical);
+        }
+        if (memoryPressure && faviconCache != null) {
             try {
                 faviconCache.trimToSize(Math.max(1, faviconCache.maxSize() / 2));
             } catch (Exception ignored) {
             }
         }
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL && faviconCache != null) {
+        if ((level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) && faviconCache != null) {
             try {
                 faviconCache.evictAll();
             } catch (Exception ignored) {
@@ -1126,7 +1143,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
                 installDownloadHintScript(view);
                   super.onPageFinished(view, url);
                 PageTranslator.onPageFinished(view, false);
-            if (url.startsWith("https://m.youtube.com") || url.startsWith("https://chatgpt.com/")) {
+            if (WebViewOptimizationUtils.shouldInjectSecretLazyLoading(url)) {
                 UiThread.postDelayed(() -> injectLazyLoading(view), 200);
             }
             if (url.equals(START_PAGE)) {
