@@ -9,6 +9,11 @@ import androidx.webkit.WebSettingsCompat;
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
+import com.coara.browser.R;
+
+import org.json.JSONObject;
+
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -16,6 +21,45 @@ public final class WebViewOptimizationUtils {
     private static final Map<String, Boolean> FEATURE_SUPPORT_CACHE = new HashMap<>();
 
     private WebViewOptimizationUtils() {}
+
+    public static void installNativeBridgeToken(WebView webView, String token) {
+        if (webView == null || token == null || token.length() < 32 || token.length() > 128) {
+            return;
+        }
+        webView.setTag(R.id.native_bridge_token, token);
+        String script = nativeBridgeTokenScript(token);
+        if (isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            try {
+                WebViewCompat.addDocumentStartJavaScript(webView, script, Collections.singleton("*"));
+            } catch (Throwable ignored) {
+            }
+        }
+        try {
+            webView.evaluateJavascript(script, null);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public static void refreshNativeBridgeToken(WebView webView) {
+        if (webView == null) {
+            return;
+        }
+        Object value = webView.getTag(R.id.native_bridge_token);
+        if (!(value instanceof String)) {
+            return;
+        }
+        try {
+            webView.evaluateJavascript(nativeBridgeTokenScript((String) value), null);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static String nativeBridgeTokenScript(String token) {
+        return "(function(){try{if(window.top!==window)return;var v=" + JSONObject.quote(token)
+                + ";var d=Object.getOwnPropertyDescriptor(window,'__coaraNativeBridgeToken');"
+                + "if(d){if(d.value!==v)return;return;}Object.defineProperty(window,'__coaraNativeBridgeToken',"
+                + "{value:v,writable:false,configurable:false,enumerable:false});}catch(e){}})();";
+    }
 
     public static boolean isFeatureSupported(String feature) {
         if (feature == null || feature.isEmpty()) {
@@ -195,7 +239,7 @@ public final class WebViewOptimizationUtils {
             + "var href=location.href;"
             + "if(!force&&href===window.__coaraLastHref)return;"
             + "window.__coaraLastHref=href;"
-            + "try{AndroidBridge.onUrlChange(href);}catch(ex){}"
+            + "try{AndroidBridge.onUrlChange(href,window.__coaraNativeBridgeToken);}catch(ex){}"
             + "};"
             + "var ps=history.pushState;"
             + "history.pushState=function(){var r=ps.apply(history,arguments);nuc(true);return r;};"
@@ -205,14 +249,14 @@ public final class WebViewOptimizationUtils {
             + "window.addEventListener('hashchange',function(){nuc(true);});"
             + "if(first)nuc(true);"
             + "}else{"
-            + "try{AndroidBridge.onUrlChange(location.href);}catch(ex2){}"
+            + "try{AndroidBridge.onUrlChange(location.href,window.__coaraNativeBridgeToken);}catch(ex2){}"
             + "}"
             + "}catch(hookErr){}};";
 
     private static final String SPA_PROBE_JS = "javascript:(function(){"
             + SPA_HOOK_JS
             + "if(window.__coaraSpaDetected===true){"
-            + "try{AndroidBridge.onSpaDetected(true);}catch(qe){}"
+            + "try{AndroidBridge.onSpaDetected(true,window.__coaraNativeBridgeToken);}catch(qe){}"
             + "hook(false);"
             + "return;"
             + "}"
@@ -258,12 +302,12 @@ public final class WebViewOptimizationUtils {
             + "if(!s&&'serviceWorker' in navigator){"
             + "try{"
             + "navigator.serviceWorker.getRegistrations().then(function(r){"
-            + "if(r&&r.length>0){try{window.__coaraSpaDetected=true;}catch(se){}AndroidBridge.onSpaDetected(true);}"
+            + "if(r&&r.length>0){try{window.__coaraSpaDetected=true;}catch(se){}AndroidBridge.onSpaDetected(true,window.__coaraNativeBridgeToken);}"
             + "}).catch(function(){});"
             + "}catch(swe){}"
             + "}"
             + "if(s){try{window.__coaraSpaDetected=true;}catch(se){}}"
-            + "AndroidBridge.onSpaDetected(s);"
+            + "AndroidBridge.onSpaDetected(s,window.__coaraNativeBridgeToken);"
             + "})();";
 
     public static void injectSpaProbe(WebView webView) {

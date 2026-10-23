@@ -5,6 +5,8 @@ import android.app.PendingIntent;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Environment;
+import android.os.SystemClock;
 import android.util.Base64;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
@@ -27,23 +29,31 @@ import java.util.Map;
 import java.lang.ref.WeakReference;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class BlobDownloadBridge {
     private static final AtomicInteger NOTIFICATION_ID_SEQ = new AtomicInteger(20000);
     private static final AtomicInteger SESSION_ID_SEQ = new AtomicInteger(1);
+    private static final AtomicLong LAST_ERROR_TOAST_AT = new AtomicLong(Long.MIN_VALUE);
     private static final long NOTIFY_INTERVAL_MS = 500;
     private static final int MAX_BASE64_CHUNK_LENGTH = 1024 * 1024;
     private static final int MAX_ACTIVE_SESSIONS = 6;
+    private static final int MAX_PENDING_CHUNKS_PER_SESSION = 4;
     private static final int MAX_TOKEN_LENGTH = 128;
     private static final long MAX_BLOB_BYTES = 8L * 1024 * 1024 * 1024;
+    private static final long MIN_FREE_SPACE_BYTES = 64L * 1024 * 1024;
+    private static final long AUTHORIZATION_WINDOW_MS = 60_000L;
     private static final long START_WINDOW_MS = 10_000L;
     private static final int START_LIMIT = 8;
     private final java.util.concurrent.atomic.AtomicLong startWindowBegin = new java.util.concurrent.atomic.AtomicLong();
     private final AtomicInteger startCount = new AtomicInteger();
 
     private final Context context;
+    private final WeakReference<WebView> owner;
+    private final Map<String, Long> authorizedDownloads = new ConcurrentHashMap<>();
     private final Map<String, Session> sessions = new ConcurrentHashMap<>();
     private final Map<String, CloseRequest> closeRequests = new ConcurrentHashMap<>();
 
@@ -60,8 +70,67 @@ public class BlobDownloadBridge {
         }
     }
 
-    public BlobDownloadBridge(Context context) {
+    public BlobDownloadBridge(Context context, WebView owner) {
         this.context = context.getApplicationContext();
+        this.owner = new WeakReference<>(owner);
+    }
+
+    public synchronized boolean authorizeDownload(String token) {
+        if (DownloadSupport.isBlank(token) || token.length() > MAX_TOKEN_LENGTH) {
+            return false;
+        }
+        long now = SystemClock.uptimeMillis();
+        for (Map.Entry<String, Long> entry : new java.util.ArrayList<>(authorizedDownloads.entrySet())) {
+            if (now - entry.getValue() > AUTHORIZATION_WINDOW_MS) {
+                authorizedDownloads.remove(entry.getKey(), entry.getValue());
+            }
+        }
+        if (authorizedDownloads.size() + sessions.size() >= MAX_ACTIVE_SESSIONS) {
+            return false;
+        }
+        return authorizedDownloads.putIfAbsent(token, now) == null;
+    }
+
+    public void cancelAuthorization(String token) {
+        if (token != null) {
+            authorizedDownloads.remove(token);
+        }
+    }
+
+    private boolean isAllowedPage() {
+        WebView view = owner.get();
+        return view != null && BridgeGuard.isWebPage(view.getUrl());
+    }
+
+    private boolean isAllowedSessionPage(Session session) {
+        WebView view = owner.get();
+        return session != null && view != null
+                && BridgeGuard.sameOrigin(session.origin, view.getUrl());
+    }
+
+    private boolean consumeAuthorization(String token) {
+        if (DownloadSupport.isBlank(token)) {
+            return false;
+        }
+        Long createdAt = authorizedDownloads.remove(token);
+        if (createdAt == null) {
+            return false;
+        }
+        long age = SystemClock.uptimeMillis() - createdAt;
+        return age >= 0L && age <= AUTHORIZATION_WINDOW_MS;
+    }
+
+    private long availableWritableBytes() {
+        try {
+            java.io.File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+            if (!dir.exists() && !dir.mkdirs() && !dir.exists()) {
+                return 0L;
+            }
+            long free = dir.getUsableSpace();
+            return Math.max(0L, free - MIN_FREE_SPACE_BYTES);
+        } catch (Exception e) {
+            return 0L;
+        }
     }
 
     public void registerCloseAfterDownload(String token, Activity activity, WebView webView,
@@ -69,7 +138,15 @@ public class BlobDownloadBridge {
         if (DownloadSupport.isBlank(token) || activity == null || webView == null || closeAction == null) {
             return;
         }
-        closeRequests.put(token, new CloseRequest(activity, webView, downloadUrl, closeAction));
+        if (token.length() > MAX_TOKEN_LENGTH || downloadUrl == null || downloadUrl.length() > 8192) {
+            return;
+        }
+        synchronized (closeRequests) {
+            if (closeRequests.size() >= MAX_ACTIVE_SESSIONS && !closeRequests.containsKey(token)) {
+                return;
+            }
+            closeRequests.put(token, new CloseRequest(activity, webView, downloadUrl, closeAction));
+        }
     }
 
     public void shutdown() {
@@ -77,6 +154,8 @@ public class BlobDownloadBridge {
             Session session = entry.getValue();
             if (session != null) {
                 try {
+                    session.terminalQueued = true;
+                    session.pendingChunks.release(MAX_PENDING_CHUNKS_PER_SESSION);
                     session.writer.shutdownNow();
                 } catch (Exception ignored) {
                 }
@@ -85,18 +164,23 @@ public class BlobDownloadBridge {
         }
         sessions.clear();
         closeRequests.clear();
+        authorizedDownloads.clear();
     }
 
     private static final class Session {
         volatile PublicStorageWriter.Target target;
         volatile long downloadId;
         volatile String fileName;
+        volatile String origin;
         volatile long totalSize;
+        volatile long maxWritableBytes;
         volatile long bytesWritten;
         volatile int notificationId;
         volatile long lastNotifyTime;
         volatile boolean failed;
         volatile boolean completed;
+        volatile boolean terminalQueued;
+        final Semaphore pendingChunks = new Semaphore(MAX_PENDING_CHUNKS_PER_SESSION, true);
         final ExecutorService writer = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "CoaraBlobWriter-" + SESSION_ID_SEQ.getAndIncrement());
             t.setDaemon(true);
@@ -106,6 +190,11 @@ public class BlobDownloadBridge {
 
     @JavascriptInterface
     public void rememberDownloadHint(String url, String fileName) {
+        if (!isAllowedPage() || DownloadSupport.isBlank(url) || url.length() > 8192
+                || DownloadSupport.isBlank(fileName) || fileName.length() > 512
+                || !BridgeGuard.isWebPage(url)) {
+            return;
+        }
         DownloadHintStore.remember(url, fileName);
     }
 
@@ -115,18 +204,30 @@ public class BlobDownloadBridge {
     }
 
     @JavascriptInterface
-    public void onBlobStart(String token, String fileName, String mimeType, String totalSizeStr,
+    public synchronized void onBlobStart(String token, String fileName, String mimeType, String totalSizeStr,
                             String contentDisposition) {
-        if (DownloadSupport.isBlank(token) || token.length() > MAX_TOKEN_LENGTH || !allowStart()
-                || (sessions.size() >= MAX_ACTIVE_SESSIONS && !sessions.containsKey(token))) {
+        if (!isAllowedPage() || !consumeAuthorization(token)
+                || DownloadSupport.isBlank(token) || token.length() > MAX_TOKEN_LENGTH
+                || sessions.containsKey(token) || !allowStart()
+                || sessions.size() >= MAX_ACTIVE_SESSIONS) {
             return;
         }
         Session session = new Session();
+        WebView ownerView = owner.get();
+        session.origin = ownerView == null ? null : ownerView.getUrl();
+        if (!BridgeGuard.isWebPage(session.origin)) {
+            session.failed = true;
+            session.writer.shutdownNow();
+            return;
+        }
         try {
             long totalSize = 0;
             try {
                 totalSize = Long.parseLong(totalSizeStr);
             } catch (Exception ignored) {
+            }
+            if (totalSize < 0L) {
+                totalSize = 0L;
             }
             String boundedFileName = fileName;
             if (boundedFileName != null && boundedFileName.length() > 512) {
@@ -149,21 +250,16 @@ public class BlobDownloadBridge {
             }
             effectiveName = DownloadSupport.sanitizeFileName(effectiveName);
             effectiveName = DownloadSupport.resolveUniqueDownloadFileName(context, effectiveName);
-            if (totalSize > MAX_BLOB_BYTES) {
-                throw new java.io.IOException("too large");
-            }
-            if (totalSize > 0) {
-                java.io.File dir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS);
-                long free = dir.getUsableSpace();
-                if (free > 0 && totalSize > free) {
-                    throw new java.io.IOException("insufficient storage");
-                }
+            long writableBytes = Math.min(MAX_BLOB_BYTES, availableWritableBytes());
+            if (writableBytes <= 0L || totalSize > MAX_BLOB_BYTES || totalSize > writableBytes) {
+                throw new java.io.IOException("insufficient storage");
             }
             PublicStorageWriter.Target target = PublicStorageWriter.openDownloadsTarget(context, effectiveName, effectiveMime);
             session.target = target;
             session.downloadId = DownloadHistoryManager.nextManualDownloadId();
             session.fileName = effectiveName;
             session.totalSize = totalSize;
+            session.maxWritableBytes = writableBytes;
             session.notificationId = NOTIFICATION_ID_SEQ.incrementAndGet();
             Session previous = sessions.get(token);
             if (previous != null && !previous.completed && !previous.failed) {
@@ -187,86 +283,160 @@ public class BlobDownloadBridge {
 
     @JavascriptInterface
     public void onBlobChunk(String token, String base64Chunk) {
-        Session session = sessions.get(token);
-        if (session == null || session.failed || session.completed || DownloadSupport.isBlank(base64Chunk)
-                || base64Chunk.length() > MAX_BASE64_CHUNK_LENGTH) {
+        if (DownloadSupport.isBlank(token) || token.length() > MAX_TOKEN_LENGTH) {
             return;
         }
-        session.writer.execute(() -> {
-            synchronized (session) {
-                if (session.failed || session.completed || session.target == null) {
-                    return;
-                }
-                try {
-                    byte[] data = Base64.decode(base64Chunk, Base64.DEFAULT);
-                    if (session.bytesWritten + data.length > MAX_BLOB_BYTES) {
-                        throw new java.io.IOException("size exceeded");
-                    }
-                    session.target.outputStream.write(data);
-                    session.bytesWritten += data.length;
-                    long now = System.currentTimeMillis();
-                    if (now - session.lastNotifyTime >= NOTIFY_INTERVAL_MS) {
-                        session.lastNotifyTime = now;
-                        postProgressNotification(session);
-                        DownloadHistoryManager.updateManualDownload(context, session.downloadId, session.fileName,
-                                session.target.displayPath, session.target.localUri, DownloadManager.STATUS_RUNNING,
-                                session.bytesWritten, session.totalSize);
-                    }
-                } catch (Exception e) {
-                    failSession(token, session);
-                }
+        Session session = sessions.get(token);
+        if (session == null || session.failed || session.completed || session.terminalQueued) {
+            return;
+        }
+        if (!isAllowedPage() || !isAllowedSessionPage(session)) {
+            failSession(token, session);
+            return;
+        }
+        if (DownloadSupport.isBlank(base64Chunk) || base64Chunk.length() > MAX_BASE64_CHUNK_LENGTH) {
+            failSession(token, session);
+            return;
+        }
+        try {
+            session.pendingChunks.acquire();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+        synchronized (session) {
+            if (session.failed || session.completed || session.terminalQueued || sessions.get(token) != session) {
+                session.pendingChunks.release();
+                return;
             }
-        });
+            try {
+                session.writer.execute(() -> {
+                    try {
+                        synchronized (session) {
+                            if (session.failed || session.completed || session.target == null) return;
+                            try {
+                                byte[] data = Base64.decode(base64Chunk, Base64.DEFAULT);
+                                long nextSize = session.bytesWritten + data.length;
+                                if (nextSize < session.bytesWritten || nextSize > session.maxWritableBytes
+                                        || nextSize > MAX_BLOB_BYTES
+                                        || (session.totalSize > 0L && nextSize > session.totalSize)
+                                        || data.length > availableWritableBytes()) {
+                                    throw new java.io.IOException("size exceeded");
+                                }
+                                session.target.outputStream.write(data);
+                                session.bytesWritten = nextSize;
+                                long now = System.currentTimeMillis();
+                                if (now - session.lastNotifyTime >= NOTIFY_INTERVAL_MS) {
+                                    session.lastNotifyTime = now;
+                                    postProgressNotification(session);
+                                    DownloadHistoryManager.updateManualDownload(context, session.downloadId, session.fileName,
+                                            session.target.displayPath, session.target.localUri, DownloadManager.STATUS_RUNNING,
+                                            session.bytesWritten, session.totalSize);
+                                }
+                            } catch (Exception e) {
+                                failSession(token, session);
+                            }
+                        }
+                    } finally {
+                        session.pendingChunks.release();
+                    }
+                });
+            } catch (RuntimeException e) {
+                session.pendingChunks.release();
+                failSession(token, session);
+            }
+        }
     }
 
     @JavascriptInterface
     public void onBlobComplete(String token) {
+        if (DownloadSupport.isBlank(token) || token.length() > MAX_TOKEN_LENGTH) return;
         Session session = sessions.get(token);
         if (session == null) {
             return;
         }
-        session.writer.execute(() -> {
-            synchronized (session) {
-                if (session.failed || session.completed || session.target == null) {
-                    return;
-                }
-                try {
-                    if (!PublicStorageWriter.finish(context, session.target)) {
-                        throw new java.io.IOException("download finalize failed");
-                    }
-                    session.completed = true;
-                    sessions.remove(token);
-                    session.writer.shutdown();
-                    CloseRequest closeRequest = closeRequests.remove(token);
-                    DownloadHistoryManager.updateManualDownload(context, session.downloadId, session.fileName,
-                            session.target.displayPath, session.target.localUri, DownloadManager.STATUS_SUCCESSFUL,
-                            session.bytesWritten, session.bytesWritten);
-                    postCompleteNotification(session);
-                    scheduleClose(closeRequest);
-                } catch (Exception e) {
-                    failSession(token, session);
-                }
+        if (!isAllowedPage() || !isAllowedSessionPage(session)) {
+            failSession(token, session);
+            return;
+        }
+        synchronized (session) {
+            if (session.failed || session.completed || session.terminalQueued) {
+                return;
             }
-        });
+            session.terminalQueued = true;
+        }
+        try {
+            session.writer.execute(() -> {
+                synchronized (session) {
+                    if (session.failed || session.completed || session.target == null) {
+                        return;
+                    }
+                    try {
+                        if (session.totalSize > 0L && session.bytesWritten != session.totalSize) {
+                            throw new java.io.IOException("download size mismatch");
+                        }
+                        if (!PublicStorageWriter.finish(context, session.target)) {
+                            throw new java.io.IOException("download finalize failed");
+                        }
+                        session.completed = true;
+                        sessions.remove(token);
+                        session.writer.shutdown();
+                        CloseRequest closeRequest = closeRequests.remove(token);
+                        DownloadHistoryManager.updateManualDownload(context, session.downloadId, session.fileName,
+                                session.target.displayPath, session.target.localUri, DownloadManager.STATUS_SUCCESSFUL,
+                                session.bytesWritten, session.bytesWritten);
+                        postCompleteNotification(session);
+                        scheduleClose(closeRequest);
+                    } catch (Exception e) {
+                        failSession(token, session);
+                    }
+                }
+            });
+        } catch (RuntimeException e) {
+            failSession(token, session);
+        }
     }
 
     @JavascriptInterface
     public void onBlobDownloadError(String errorMessage) {
+        if (!isAllowedPage()) {
+            return;
+        }
         String m = DownloadSupport.isBlank(errorMessage) ? "unknown" : errorMessage.replaceAll("[\\r\\n\\p{Cntrl}]", " ");
         if (m.length() > 120) {
             m = m.substring(0, 120);
         }
-        postToast("blob ダウンロードエラー: " + m);
+        postRateLimitedErrorToast("blob ダウンロードエラー: " + m);
     }
 
     @JavascriptInterface
     public void onBlobError(String token, String message) {
-        Session session = sessions.get(token);
-        if (session == null) {
-            postToast("ダウンロードに失敗しました");
+        if (DownloadSupport.isBlank(token) || token.length() > MAX_TOKEN_LENGTH) {
+            if (isAllowedPage()) postRateLimitedErrorToast("ダウンロードに失敗しました");
             return;
         }
-        session.writer.execute(() -> failSession(token, session));
+        Session session = sessions.get(token);
+        if (session == null) {
+            if (isAllowedPage()) {
+                postRateLimitedErrorToast("ダウンロードに失敗しました");
+            }
+            return;
+        }
+        if (!isAllowedPage() || !isAllowedSessionPage(session)) {
+            failSession(token, session);
+            return;
+        }
+        synchronized (session) {
+            if (session.failed || session.completed || session.terminalQueued) {
+                return;
+            }
+            session.terminalQueued = true;
+        }
+        try {
+            session.writer.execute(() -> failSession(token, session));
+        } catch (RuntimeException e) {
+            failSession(token, session);
+        }
     }
 
     private boolean allowStart() {
@@ -323,6 +493,20 @@ public class BlobDownloadBridge {
 
     private void postToast(String message) {
         UiThread.post(() -> Toast.makeText(context, message, Toast.LENGTH_LONG).show());
+    }
+
+    private void postRateLimitedErrorToast(String message) {
+        long now = SystemClock.uptimeMillis();
+        while (true) {
+            long previous = LAST_ERROR_TOAST_AT.get();
+            if (previous != Long.MIN_VALUE && now - previous < 5000L) {
+                return;
+            }
+            if (LAST_ERROR_TOAST_AT.compareAndSet(previous, now)) {
+                postToast(message);
+                return;
+            }
+        }
     }
 
     private void postProgressNotification(Session session) {

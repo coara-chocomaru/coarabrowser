@@ -230,7 +230,7 @@ public class KeyboardGameWebView extends WebView {
     }
 
     public void installTouchpadPointerLockTracking() {
-        evaluateJavascript("(function(){var d=document,w=window;function n(){try{AndroidBridge.onPointerLockChanged(!!d.pointerLockElement);}catch(e){}}function i(doc){try{if(!doc||doc.__coaraTouchpadPointerLockInstalled)return;doc.__coaraTouchpadPointerLockInstalled=true;doc.addEventListener('pointerlockchange',n,true);doc.addEventListener('pointerlockerror',n,true);var fs=doc.querySelectorAll('iframe,frame');for(var j=0;j<fs.length;j++){try{i(fs[j].contentDocument);}catch(e){}}}catch(e){}}i(d);n();})();", null);
+        evaluateJavascript("(function(){var d=document,w=window;function n(){try{AndroidBridge.onPointerLockChanged(!!d.pointerLockElement,window.__coaraNativeBridgeToken);}catch(e){}}function i(doc){try{if(!doc||doc.__coaraTouchpadPointerLockInstalled)return;doc.__coaraTouchpadPointerLockInstalled=true;doc.addEventListener('pointerlockchange',n,true);doc.addEventListener('pointerlockerror',n,true);var fs=doc.querySelectorAll('iframe,frame');for(var j=0;j<fs.length;j++){try{i(fs[j].contentDocument);}catch(e){}}}catch(e){}}i(d);n();})();", null);
     }
 
     public boolean dispatchTouchpadMouseMove(float dx, float dy) {
