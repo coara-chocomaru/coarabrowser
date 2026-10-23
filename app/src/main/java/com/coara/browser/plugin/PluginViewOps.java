@@ -10,4 +10,6 @@ interface PluginViewOps {
     void notifyUser(String title, String text);
 
     boolean copyText(String text);
+
+    String currentUrl();
 }

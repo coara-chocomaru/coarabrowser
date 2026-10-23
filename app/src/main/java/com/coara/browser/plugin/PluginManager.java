@@ -295,6 +295,9 @@ public final class PluginManager {
         ensureLoadedLocked();
         reloadIfChanged();
         PluginInfo info = parsed.info.copy();
+        if (!isSafePluginId(info.id)) {
+            throw new PluginInstallException("プラグインIDが無効です");
+        }
         PluginInfo existing = find(info.id);
         if (existing != null && parsed.fallbackTitle) {
             info.id = uniqueId(info.id);
@@ -467,8 +470,21 @@ public final class PluginManager {
         if (p == null || p.icon == null || p.icon.isEmpty()) {
             return null;
         }
-        File f = new File(new File(root, p.id), p.icon);
-        return f.isFile() ? f : null;
+        if (!isSafePluginId(p.id)) {
+            return null;
+        }
+        File dir = new File(root, p.id);
+        File f = new File(dir, p.icon);
+        try {
+            String canonicalDir = dir.getCanonicalPath();
+            String canonicalFile = f.getCanonicalPath();
+            if (!canonicalFile.startsWith(canonicalDir + File.separator) || !f.isFile()) {
+                return null;
+            }
+            return f;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     public void log(String level, String id, String message) {
@@ -664,7 +680,7 @@ public final class PluginManager {
                     logger.log("W", id, "権限「xhr」が無いためGM_xmlhttpRequestを拒否しました");
                     return "0";
                 }
-                return xhrStart(p, a, b) ? "1" : "0";
+                return xhrStart(p, a, b, ops == null ? "" : ops.currentUrl()) ? "1" : "0";
             case "xhrPoll":
                 return xhrPoll(id, a);
             case "xhrAbort":
@@ -729,7 +745,7 @@ public final class PluginManager {
         return cut < 0 ? url : url.substring(0, cut);
     }
 
-    private boolean xhrStart(PluginInfo p, String reqId, String optsJson) {
+    private boolean xhrStart(PluginInfo p, String reqId, String optsJson, String trustedOrigin) {
         if (reqId == null || reqId.isEmpty() || reqId.length() > 40 || optsJson == null || optsJson.length() > 3_000_000) {
             return false;
         }
@@ -768,7 +784,8 @@ public final class PluginManager {
             xhrPool.execute(new Runnable() {
             @Override
             public void run() {
-                JSONObject result = PluginHttp.execute(opts, connects, state.call);
+                JSONObject result = PluginHttp.execute(opts, connects, state.call,
+                        trustedOrigin != null && trustedOrigin.length() <= 8192 ? trustedOrigin : "");
                 if (result.has("error") && !result.optBoolean("aborted", false)) {
                     logger.log("W", pid, "xhr失敗: " + result.optString("error") + " url=" + shownUrl);
                 }
@@ -1329,6 +1346,10 @@ public final class PluginManager {
         });
     }
 
+    private static boolean isSafePluginId(String id) {
+        return id != null && id.length() <= 64 && id.matches("[a-z0-9][a-z0-9_-]{0,63}");
+    }
+
     private PluginInfo find(String id) {
         if (id == null) {
             return null;
@@ -1364,8 +1385,12 @@ public final class PluginManager {
             try {
                 JSONArray arr = new JSONArray(readFileText(indexFile));
                 for (int i = 0; i < arr.length(); i++) {
+                    if (plugins.size() >= MAX_PLUGINS) {
+                        break;
+                    }
                     PluginInfo p = PluginInfo.fromJson(arr.getJSONObject(i));
-                    if (!p.id.isEmpty() && new File(root, p.id).isDirectory()) {
+                    if (isSafePluginId(p.id) && find(p.id) == null
+                            && new File(root, p.id).isDirectory()) {
                         plugins.add(p);
                     }
                 }

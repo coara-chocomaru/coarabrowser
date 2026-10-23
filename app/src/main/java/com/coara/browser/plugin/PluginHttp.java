@@ -227,13 +227,13 @@ final class PluginHttp {
         return o;
     }
 
-    static JSONObject execute(JSONObject opts, List<String> connects, Call call) {
+    static JSONObject execute(JSONObject opts, List<String> connects, Call call, String trustedOrigin) {
         try {
             String url = opts.optString("url", "");
             if (url.length() > 8192) {
                 return errorPayload("url too long");
             }
-            String origin = opts.optString("origin", "");
+            String origin = trustedOrigin == null || trustedOrigin.length() > 8192 ? "" : trustedOrigin;
             String method = opts.optString("method", "GET").toUpperCase(Locale.US);
             if (!method.matches("[A-Z]{3,10}")) {
                 return errorPayload("invalid method");
@@ -271,6 +271,12 @@ final class PluginHttp {
             String responseType = opts.optString("responseType", "");
             String user = opts.optString("user", "");
             String password = opts.optString("password", "");
+            String userAgent = opts.optString("ua", "Mozilla/5.0 (Linux; Android 10) CoaraBrowser");
+            String charsetOverride = opts.optString("charset", "");
+            if (responseType.length() > 64 || user.length() > 4096 || password.length() > 4096
+                    || userAgent.length() > 8192 || charsetOverride.length() > 128) {
+                return errorPayload("request metadata too large");
+            }
 
             String current = url;
             int redirects = 0;
@@ -311,11 +317,11 @@ final class PluginHttp {
                         }
                     }
                     if (!hasUa) {
-                        c.setRequestProperty("User-Agent", opts.optString("ua", "Mozilla/5.0 (Linux; Android 10) CoaraBrowser"));
+                        c.setRequestProperty("User-Agent", userAgent);
                     }
                     if (!anonymous && !hasCookie) {
                         String cookie = CookieSitePolicy.cookieFor(current);
-                        if (cookie != null && !cookie.isEmpty()) {
+                        if (cookie != null && !cookie.isEmpty() && cookie.length() <= 65536) {
                             c.setRequestProperty("Cookie", cookie);
                         }
                     }
@@ -337,7 +343,9 @@ final class PluginHttp {
                         List<String> sc = hf == null ? null : hf.get("Set-Cookie");
                         if (sc != null) {
                             for (String s : sc) {
-                                CookieManager.getInstance().setCookie(current, s);
+                                if (s != null && s.length() <= 8192) {
+                                    CookieManager.getInstance().setCookie(current, s);
+                                }
                             }
                         }
                     }
@@ -390,7 +398,7 @@ final class PluginHttp {
                         out.put("b64", Base64.encodeToString(data, Base64.NO_WRAP));
                         out.put("mime", ctype == null ? "" : ctype);
                     } else {
-                        out.put("text", new String(data, charsetOf(ctype, opts.optString("charset", ""))));
+                        out.put("text", new String(data, charsetOf(ctype, charsetOverride)));
                     }
                     return out;
                 } finally {

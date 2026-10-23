@@ -88,6 +88,7 @@ public final class PluginRuntime {
         boolean injectedForNavigation = false;
         long navigationStartedAt = 0L;
         long navigationGeneration = 0L;
+        volatile String currentUrl = "";
         final Map<String, String[]> commands = new LinkedHashMap<>();
     }
 
@@ -153,6 +154,11 @@ public final class PluginRuntime {
                     }
                 }
             });
+        }
+
+        @Override
+        public String currentUrl() {
+            return state.currentUrl;
         }
 
         @Override
@@ -238,6 +244,7 @@ public final class PluginRuntime {
             PluginManager manager = PluginManager.get(context);
             manager.reloadIfChanged();
             ViewState state = new ViewState();
+            state.currentUrl = boundedUrl(view.getUrl());
             view.addJavascriptInterface(manager.createBridge(new ViewOpsImpl(view, state)), PluginManager.BRIDGE_NAME);
             view.setTag(R.id.plugin_view_state, state);
             syncStartScripts(view, state, manager);
@@ -258,6 +265,7 @@ public final class PluginRuntime {
             PluginManager manager = PluginManager.get(view.getContext());
             manager.reloadIfChanged();
             syncStartScripts(view, state, manager);
+            state.currentUrl = boundedUrl(view.getUrl());
             state.injectedForNavigation = false;
             state.navigationStartedAt = System.currentTimeMillis();
             state.navigationGeneration++;
@@ -284,6 +292,7 @@ public final class PluginRuntime {
             if (state.appliedVersion != manager.version()) {
                 syncStartScripts(view, state, manager);
             }
+            state.currentUrl = boundedUrl(url);
             state.injectedForNavigation = false;
             state.navigationStartedAt = System.currentTimeMillis();
             state.navigationGeneration++;
@@ -487,6 +496,10 @@ public final class PluginRuntime {
             state.startScriptsActive = false;
             manager.log("E", "-", "ドキュメント開始スクリプトの登録に失敗(フォールバックへ切替): " + t);
         }
+    }
+
+    private static String boundedUrl(String url) {
+        return url != null && url.length() <= 8192 ? url : "";
     }
 
     private static void removeHandlers(ViewState state) {
