@@ -1813,7 +1813,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         applyRendererPriority(webView, true);
         webView.setScrollBarStyle(View.SCROLLBARS_INSIDE_OVERLAY);
         webView.setBackgroundColor(Color.WHITE);
-        if (!NativeMessageBridge.attach(webView, this::handleNativeBridgeMessage)) {
+        if (!NativeMessageBridge.attach(webView, this::handleNativeBridgeMessage, this::handleNativeTouchpadMessage)) {
             AndroidBridge androidBridge = new AndroidBridge(webView);
             webView.addJavascriptInterface(androidBridge, "AndroidBridge");
             WebViewOptimizationUtils.installNativeBridgeToken(webView, androidBridge.getBridgeToken());
@@ -3965,6 +3965,12 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
         current.loadUrl(url);
     }
 
+    private void handleNativeTouchpadMessage(WebView owner, int kind, float a, float b) {
+        if (owner == getCurrentWebView()) {
+            TouchpadController.postHostRequest(owner, kind, a, b);
+        }
+    }
+
     private void handleNativeBridgeMessage(WebView owner, JSONObject message) {
         if (owner == null || message == null || !BridgeGuard.isWebPage(owner.getUrl())) {
             return;
@@ -3983,51 +3989,29 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
             return;
         }
         if ("pointerlock".equals(type)) {
-            boolean locked = message.optBoolean("locked", false);
-            UiThread.post(() -> {
-                try {
-                    if (owner == getCurrentWebView() && BridgeGuard.isWebPage(owner.getUrl())) {
-                        TouchpadController.setPointerLocked(owner, locked);
-                    }
-                } catch (Exception ignored) {
-                }
-            });
+            if (owner == getCurrentWebView() && BridgeGuard.isWebPage(owner.getUrl())) {
+                TouchpadController.setPointerLocked(owner, message.optBoolean("locked", false));
+            }
             return;
         }
         if ("url".equals(type)) {
             String url = message.optString("url", "");
-            if (url.length() > 4096 || !BridgeGuard.acceptReportedUrl(owner.getUrl(), url)) {
+            if (url.length() > 4096 || owner != getCurrentWebView()
+                    || !BridgeGuard.acceptReportedUrl(owner.getUrl(), url)) {
                 return;
             }
-            UiThread.post(() -> {
-                try {
-                    if (owner != getCurrentWebView()
-                            || !BridgeGuard.acceptReportedUrl(owner.getUrl(), url)) {
-                        return;
-                    }
-                    scheduleSpaHistoryUpdate(owner, url);
-                    DesktopContentOptimizer.apply(owner, deskuaEnabled);
-                } catch (Exception ignored) {
-                }
-            });
+            scheduleSpaHistoryUpdate(owner, url);
+            DesktopContentOptimizer.applyAfterUrlChange(owner, deskuaEnabled);
             return;
         }
-        if ("spa".equals(type) && owner == getCurrentWebView()) {
+        if ("spa".equals(type) && owner == getCurrentWebView() && BridgeGuard.isWebPage(owner.getUrl())) {
             boolean detected = message.optBoolean("detected", false);
-            UiThread.post(() -> {
-                try {
-                    if (owner != getCurrentWebView() || !BridgeGuard.isWebPage(owner.getUrl())) {
-                        return;
-                    }
-                    SpaStateManager.getInstance().setDetected(owner, detected);
-                    String currentUrl = owner.getUrl();
-                    updatePullToRefreshState(owner, currentUrl);
-                    if (currentUrl != null) {
-                        owner.getSettings().setCacheMode(CacheModePolicy.determinePostLoad(currentUrl, detected));
-                    }
-                } catch (Exception ignored) {
-                }
-            });
+            SpaStateManager.getInstance().setDetected(owner, detected);
+            String currentUrl = owner.getUrl();
+            updatePullToRefreshState(owner, currentUrl);
+            if (currentUrl != null) {
+                owner.getSettings().setCacheMode(CacheModePolicy.determinePostLoad(currentUrl, detected));
+            }
         }
     }
 
@@ -4093,7 +4077,7 @@ public class MainActivity extends AppCompatActivity implements PluginHost, Plugi
                             return;
                         }
                         scheduleSpaHistoryUpdate(owner, url);
-                        DesktopContentOptimizer.apply(owner, deskuaEnabled);
+                        DesktopContentOptimizer.applyAfterUrlChange(owner, deskuaEnabled);
                     } catch (Exception ignored) {}
                 }
             });

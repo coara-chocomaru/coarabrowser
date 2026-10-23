@@ -826,7 +826,7 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         KeyboardSettings.configureWebView(webView, pref);
         webView.setScrollBarStyle(View.SCROLLBARS_INSIDE_OVERLAY);
         webView.setBackgroundColor(Color.WHITE);
-        if (!NativeMessageBridge.attach(webView, this::handleNativeBridgeMessage)) {
+        if (!NativeMessageBridge.attach(webView, this::handleNativeBridgeMessage, this::handleNativeTouchpadMessage)) {
             AndroidBridge androidBridge = new AndroidBridge(webView);
             webView.addJavascriptInterface(androidBridge, "AndroidBridge");
             com.coara.browser.webview.WebViewOptimizationUtils.installNativeBridgeToken(webView, androidBridge.getBridgeToken());
@@ -2000,51 +2000,43 @@ public class SecretActivity extends AppCompatActivity implements PluginHost, Plu
         current.loadUrl(url);
     }
 
+    private void handleNativeTouchpadMessage(WebView owner, int kind, float a, float b) {
+        if (owner == getCurrentWebView()) {
+            TouchpadController.postHostRequest(owner, kind, a, b);
+        }
+    }
+
     private void handleNativeBridgeMessage(WebView owner, JSONObject message) {
         if (owner == null || message == null || !BridgeGuard.isWebPage(owner.getUrl())) {
             return;
         }
         String type = message.optString("type", "");
         if ("touchpad".equals(type)) {
-            if (owner != getCurrentWebView()) {
-                return;
-            }
-            int kind = message.optInt("kind", -1);
-            double a = message.optDouble("a", Double.NaN);
-            double b = message.optDouble("b", Double.NaN);
-            if (Double.isFinite(a) && Double.isFinite(b)) {
-                TouchpadController.postHostRequest(owner, kind, (float) a, (float) b);
+            if (owner == getCurrentWebView()) {
+                int kind = message.optInt("kind", -1);
+                double a = message.optDouble("a", Double.NaN);
+                double b = message.optDouble("b", Double.NaN);
+                if (Double.isFinite(a) && Double.isFinite(b)) {
+                    TouchpadController.postHostRequest(owner, kind, (float) a, (float) b);
+                }
             }
             return;
         }
         if ("pointerlock".equals(type)) {
-            boolean locked = message.optBoolean("locked", false);
-            UiThread.post(() -> {
-                try {
-                    if (owner == getCurrentWebView() && BridgeGuard.isWebPage(owner.getUrl())) {
-                        TouchpadController.setPointerLocked(owner, locked);
-                    }
-                } catch (Exception ignored) {
-                }
-            });
+            if (owner == getCurrentWebView() && BridgeGuard.isWebPage(owner.getUrl())) {
+                TouchpadController.setPointerLocked(owner, message.optBoolean("locked", false));
+            }
             return;
         }
         if ("url".equals(type)) {
             String url = message.optString("url", "");
-            if (url.length() > 4096 || !BridgeGuard.acceptReportedUrl(owner.getUrl(), url)) {
-                return;
+            if (url.length() <= 4096 && owner == getCurrentWebView()
+                    && BridgeGuard.acceptReportedUrl(owner.getUrl(), url)) {
+                scheduleSpaHistoryUpdate(owner, url);
             }
-            UiThread.post(() -> {
-                try {
-                    if (owner != getCurrentWebView() || !BridgeGuard.acceptReportedUrl(owner.getUrl(), url)) {
-                        return;
-                    }
-                    scheduleSpaHistoryUpdate(owner, url);
-                } catch (Exception ignored) {
-                }
-            });
         }
     }
+
 private class AndroidBridge {
     private final WebView owner;
     private final String bridgeToken = java.util.UUID.randomUUID().toString().replace("-", "")
