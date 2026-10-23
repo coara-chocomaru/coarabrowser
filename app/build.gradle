@@ -1,6 +1,7 @@
-plugins { 
+plugins {
     id 'com.android.application'
 }
+
 android {
     compileSdk = 37
     namespace = 'com.coara.browser'
@@ -10,13 +11,19 @@ android {
         targetSdk = 31
         versionCode = 345
         versionName = "4.4.4-6"
+
         if (project.hasProperty('bundleBuild')) {
             ndk {
                 abiFilters 'arm64-v8a', 'armeabi-v7a'
             }
         }
+
         vectorDrawables.useSupportLibrary = true
-        proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+
+        proguardFiles(
+            getDefaultProguardFile('proguard-android-optimize.txt'),
+            'proguard-rules.pro'
+        )
     }
 
     compileOptions {
@@ -24,10 +31,11 @@ android {
         targetCompatibility JavaVersion.VERSION_21
         coreLibraryDesugaringEnabled = true
     }
-    
+
     signingConfigs {
         release {
             def releaseKeystorePath = System.getenv('RELEASE_KEYSTORE_PATH')
+
             if (releaseKeystorePath) {
                 storeFile file(releaseKeystorePath)
                 storePassword System.getenv('RELEASE_KEYSTORE_PASSWORD')
@@ -46,6 +54,7 @@ android {
         debug {
             signingConfig = signingConfigs.debug
         }
+
         release {
             minifyEnabled = true
             shrinkResources = true
@@ -69,15 +78,32 @@ android {
     }
 
     lint {
-        disable += ['ExpiredTargetSdkVersion', 'NewApi', 'Range', 'SetTextI18n', 'ScopedStorage', 'FieldCanBeLocal', 'GradleDependency']
+        disable += [
+            'ExpiredTargetSdkVersion',
+            'NewApi',
+            'Range',
+            'SetTextI18n',
+            'ScopedStorage',
+            'FieldCanBeLocal',
+            'GradleDependency'
+        ]
     }
+
     packagingOptions {
-        excludes += ["DebugProbesKt.bin", "META-INF/*.version", "kotlin-tooling-metadata.json", "**/*.kotlin_builtins"]
+        excludes += [
+            "DebugProbesKt.bin",
+            "META-INF/*.version",
+            "kotlin-tooling-metadata.json",
+            "**/*.kotlin_builtins"
+        ]
     }
 }
 
 tasks.withType(JavaCompile).configureEach {
-    options.compilerArgs += ["-Xlint:deprecation", "-Xlint:unchecked"]
+    options.compilerArgs += [
+        "-Xlint:deprecation",
+        "-Xlint:unchecked"
+    ]
 }
 
 dependencies {
@@ -94,7 +120,7 @@ dependencies {
     implementation 'androidx.recyclerview:recyclerview:1.4.0'
     implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.2.0'
     implementation 'androidx.cardview:cardview:1.0.0'
-    implementation 'androidx.webkit:webkit:1.17.1'
+    implementation 'androidx.webkit:webkit:1.18.0'
     implementation 'com.google.mlkit:translate:17.0.3'
     implementation 'com.google.mlkit:language-id:17.0.6'
     implementation 'androidx.activity:activity:1.13.0'
