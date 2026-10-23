@@ -231,7 +231,8 @@ public final class WebViewOptimizationUtils {
         }
     }
 
-    private static final String SPA_HOOK_JS = "var hook=function(first){try{"
+    private static final String SPA_HOOK_JS = "var sendNative=function(type,value){try{if(window.CoaraNativeBridge&&typeof window.CoaraNativeBridge.postMessage==='function'){var m={type:type};if(type==='url')m.url=value;else m.detected=value;window.CoaraNativeBridge.postMessage(JSON.stringify(m));return;}}catch(e){}try{if(type==='url')AndroidBridge.onUrlChange(value,window.__coaraNativeBridgeToken);else AndroidBridge.onSpaDetected(value,window.__coaraNativeBridgeToken);}catch(e){}};"
+            + "var hook=function(first){try{"
             + "if(!window.__coaraHistoryHooked){"
             + "window.__coaraHistoryHooked=true;"
             + "window.__coaraLastHref=location.href;"
@@ -239,7 +240,7 @@ public final class WebViewOptimizationUtils {
             + "var href=location.href;"
             + "if(!force&&href===window.__coaraLastHref)return;"
             + "window.__coaraLastHref=href;"
-            + "try{AndroidBridge.onUrlChange(href,window.__coaraNativeBridgeToken);}catch(ex){}"
+            + "sendNative('url',href);"
             + "};"
             + "var ps=history.pushState;"
             + "history.pushState=function(){var r=ps.apply(history,arguments);nuc(true);return r;};"
@@ -249,14 +250,14 @@ public final class WebViewOptimizationUtils {
             + "window.addEventListener('hashchange',function(){nuc(true);});"
             + "if(first)nuc(true);"
             + "}else{"
-            + "try{AndroidBridge.onUrlChange(location.href,window.__coaraNativeBridgeToken);}catch(ex2){}"
+            + "sendNative('url',location.href);"
             + "}"
             + "}catch(hookErr){}};";
 
     private static final String SPA_PROBE_JS = "javascript:(function(){"
             + SPA_HOOK_JS
             + "if(window.__coaraSpaDetected===true){"
-            + "try{AndroidBridge.onSpaDetected(true,window.__coaraNativeBridgeToken);}catch(qe){}"
+            + "sendNative('spa',true);"
             + "hook(false);"
             + "return;"
             + "}"
@@ -302,12 +303,12 @@ public final class WebViewOptimizationUtils {
             + "if(!s&&'serviceWorker' in navigator){"
             + "try{"
             + "navigator.serviceWorker.getRegistrations().then(function(r){"
-            + "if(r&&r.length>0){try{window.__coaraSpaDetected=true;}catch(se){}AndroidBridge.onSpaDetected(true,window.__coaraNativeBridgeToken);}"
+            + "if(r&&r.length>0){try{window.__coaraSpaDetected=true;}catch(se){}sendNative('spa',true);}"
             + "}).catch(function(){});"
             + "}catch(swe){}"
             + "}"
             + "if(s){try{window.__coaraSpaDetected=true;}catch(se){}}"
-            + "AndroidBridge.onSpaDetected(s,window.__coaraNativeBridgeToken);"
+            + "sendNative('spa',s);"
             + "})();";
 
     public static void injectSpaProbe(WebView webView) {
