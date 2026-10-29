@@ -1,5 +1,6 @@
 (function(PLG){
 var B=window["%BRIDGE%"];
+if(window.__coaraPluginBridgeGuarded!==true)B=null;
 var T="%TOKEN%";
 var META=%META%;
 var CSS=%CSS%;
