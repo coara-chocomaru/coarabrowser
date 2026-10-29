@@ -1,12 +1,6 @@
 package com.coara.browser.util;
 
-import android.os.Handler;
-import android.os.Looper;
 import android.os.SystemClock;
-import android.view.InputDevice;
-import android.view.KeyCharacterMap;
-import android.view.KeyEvent;
-import android.view.MotionEvent;
 import android.webkit.ValueCallback;
 import android.webkit.WebView;
 
@@ -21,30 +15,10 @@ public final class TouchpadController {
     private static final String CALL_MID = "==='function'){n.";
     private static final String CALL_TAIL = ");return 1;}return 0;}catch(e){return 0;}})();";
     private static final long REINSTALL_INTERVAL_MS = 700L;
-    private static final int KIND_HOVER = 1;
-    private static final int KIND_TOUCH_DOWN = 2;
-    private static final int KIND_TOUCH_MOVE = 3;
-    private static final int KIND_TOUCH_UP = 4;
-    private static final int KIND_KEY_DOWN = 5;
-    private static final int KIND_KEY_UP = 6;
-    private static final long TOUCH_UP_DELAY_MS = 40L;
 
-    private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
-    private static final Object HOST_MOVE_LOCK = new Object();
-    private static final class PendingMotion {
-        WebView owner;
-        float a;
-        float b;
-        boolean pending;
-    }
-    private static final PendingMotion pendingHover = new PendingMotion();
-    private static final PendingMotion pendingTouchMove = new PendingMotion();
-    private static final MotionEvent.PointerProperties[] HOVER_PROPERTIES = {new MotionEvent.PointerProperties()};
-    private static final MotionEvent.PointerCoords[] HOVER_COORDS = {new MotionEvent.PointerCoords()};
     private static WeakReference<WebView> currentWebView = new WeakReference<>(null);
     private static volatile boolean active;
     private static volatile boolean blockScreenTouch;
-    private static boolean injecting;
     private static float pendingMoveX;
     private static float pendingMoveY;
     private static float pendingStickX;
@@ -55,20 +29,10 @@ public final class TouchpadController {
     private static int stickMode;
     private static boolean flushScheduled;
     private static WebView flushWebView;
-    private static boolean hostMoveScheduled;
     private static boolean bridgeInstalled;
     private static long lastInstallTime;
     private static long lastBridgeCheckTime;
-    private static long nativeTouchDownTime;
-    private static boolean nativeTouchDown;
     private static String bridgeSource;
-
-    static {
-        HOVER_PROPERTIES[0].id = 0;
-        HOVER_PROPERTIES[0].toolType = MotionEvent.TOOL_TYPE_MOUSE;
-        HOVER_COORDS[0].pressure = 0f;
-        HOVER_COORDS[0].size = 1f;
-    }
 
     private static final Runnable FLUSH_SCHEDULED_MOVE = new Runnable() {
         @Override
@@ -78,45 +42,6 @@ public final class TouchpadController {
             flushScheduled = false;
             if (target != null) {
                 flush(target);
-            }
-        }
-    };
-
-    private static final Runnable FLUSH_HOST_MOVES = new Runnable() {
-        @Override
-        public void run() {
-            WebView hoverOwner = null;
-            WebView touchOwner = null;
-            float hoverA = 0f;
-            float hoverB = 0f;
-            float touchA = 0f;
-            float touchB = 0f;
-            boolean hasHover;
-            boolean hasTouch;
-            synchronized (HOST_MOVE_LOCK) {
-                hasHover = pendingHover.pending;
-                if (hasHover) {
-                    hoverOwner = pendingHover.owner;
-                    hoverA = pendingHover.a;
-                    hoverB = pendingHover.b;
-                    pendingHover.pending = false;
-                    pendingHover.owner = null;
-                }
-                hasTouch = pendingTouchMove.pending;
-                if (hasTouch) {
-                    touchOwner = pendingTouchMove.owner;
-                    touchA = pendingTouchMove.a;
-                    touchB = pendingTouchMove.b;
-                    pendingTouchMove.pending = false;
-                    pendingTouchMove.owner = null;
-                }
-                hostMoveScheduled = false;
-            }
-            if (hasHover && hoverOwner != null) {
-                dispatchHostRequest(hoverOwner, KIND_HOVER, hoverA, hoverB);
-            }
-            if (hasTouch && touchOwner != null) {
-                dispatchHostRequest(touchOwner, KIND_TOUCH_MOVE, touchA, touchB);
             }
         }
     };
@@ -146,7 +71,6 @@ public final class TouchpadController {
             return;
         }
         if (current != null) {
-            abandonNativeTouch(current);
             call(current, "stop", null);
         }
         currentWebView = new WeakReference<>(webView);
@@ -161,7 +85,6 @@ public final class TouchpadController {
 
     public static void clearCurrentWebView(WebView webView) {
         if (currentWebView.get() == webView) {
-            abandonNativeTouch(webView);
             call(webView, "stop", null);
             currentWebView = new WeakReference<>(null);
             clearPending();
@@ -218,7 +141,6 @@ public final class TouchpadController {
         if (enabled) {
             installAndStart(webView);
         } else {
-            abandonNativeTouch(webView);
             call(webView, "stop", null);
         }
     }
@@ -232,17 +154,7 @@ public final class TouchpadController {
     }
 
     public static boolean shouldDropScreenTouch() {
-        return active && blockScreenTouch && !injecting;
-    }
-
-    private static void abandonNativeTouch(WebView view) {
-        if (nativeTouchDown && view != null) {
-            try {
-                injectTouch(view, MotionEvent.ACTION_CANCEL, 0f, 0f);
-            } catch (Throwable ignored) {
-            }
-        }
-        nativeTouchDown = false;
+        return active && blockScreenTouch;
     }
 
     public static void setStickMode(int mode) {
@@ -497,139 +409,8 @@ public final class TouchpadController {
         bridgeInstalled = false;
         lastBridgeCheckTime = 0L;
         installAndStart(webView);
-        if (nativeTouchDown) {
-            nativeTouchDown = false;
-        }
     }
 
-    public static void postHostRequest(final WebView owner, final int kind, final float a, final float b) {
-        if (!active || owner == null || !isFinite(a) || !isFinite(b)) {
-            return;
-        }
-        if (kind == KIND_HOVER || kind == KIND_TOUCH_MOVE) {
-            synchronized (HOST_MOVE_LOCK) {
-                PendingMotion pending = kind == KIND_HOVER ? pendingHover : pendingTouchMove;
-                pending.owner = owner;
-                pending.a = a;
-                pending.b = b;
-                pending.pending = true;
-                if (!hostMoveScheduled) {
-                    hostMoveScheduled = true;
-                    MAIN_HANDLER.post(FLUSH_HOST_MOVES);
-                }
-            }
-            return;
-        }
-        MAIN_HANDLER.post(new Runnable() {
-            @Override
-            public void run() {
-                dispatchHostRequest(owner, kind, a, b);
-            }
-        });
-    }
-
-    private static void dispatchHostRequest(WebView owner, int kind, float a, float b) {
-        try {
-            onHostRequest(owner, kind, a, b);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    public static void onHostRequest(WebView owner, int kind, float a, float b) {
-        if (!active || owner == null || currentWebView.get() != owner || !isFinite(a) || !isFinite(b)) {
-            return;
-        }
-        int w = owner.getWidth();
-        int h = owner.getHeight();
-        if (w <= 1 || h <= 1) {
-            return;
-        }
-        float x = Math.max(0f, Math.min(1f, a)) * (w - 1);
-        float y = Math.max(0f, Math.min(1f, b)) * (h - 1);
-        try {
-            switch (kind) {
-                case KIND_HOVER:
-                    injectHover(owner, x, y);
-                    break;
-                case KIND_TOUCH_DOWN:
-                    injectTouch(owner, MotionEvent.ACTION_DOWN, x, y);
-                    break;
-                case KIND_TOUCH_MOVE:
-                    injectTouch(owner, MotionEvent.ACTION_MOVE, x, y);
-                    break;
-                case KIND_TOUCH_UP:
-                    final float ux = x;
-                    final float uy = y;
-                    owner.postDelayed(new Runnable() {
-                        @Override
-                        public void run() {
-                            if (currentWebView.get() == owner) {
-                                injectTouch(owner, MotionEvent.ACTION_UP, ux, uy);
-                            }
-                        }
-                    }, TOUCH_UP_DELAY_MS);
-                    break;
-                case KIND_KEY_DOWN:
-                    injectKey(owner, KeyEvent.ACTION_DOWN, (int) a);
-                    break;
-                case KIND_KEY_UP:
-                    injectKey(owner, KeyEvent.ACTION_UP, (int) a);
-                    break;
-                default:
-                    break;
-            }
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private static void injectHover(WebView view, float x, float y) {
-        long now = SystemClock.uptimeMillis();
-        MotionEvent.PointerCoords coords = HOVER_COORDS[0];
-        coords.x = x;
-        coords.y = y;
-        MotionEvent event = MotionEvent.obtain(now, now, MotionEvent.ACTION_HOVER_MOVE, 1,
-                HOVER_PROPERTIES, HOVER_COORDS, 0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_MOUSE, 0);
-        try {
-            view.dispatchGenericMotionEvent(event);
-        } finally {
-            event.recycle();
-        }
-    }
-
-    private static void injectTouch(WebView view, int action, float x, float y) {
-        long now = SystemClock.uptimeMillis();
-        if (action == MotionEvent.ACTION_DOWN) {
-            nativeTouchDownTime = now;
-            nativeTouchDown = true;
-        } else if (!nativeTouchDown) {
-            return;
-        }
-        MotionEvent event = MotionEvent.obtain(nativeTouchDownTime, now, action, x, y, 0);
-        event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-        boolean wasInjecting = injecting;
-        injecting = true;
-        try {
-            view.dispatchTouchEvent(event);
-        } finally {
-            injecting = wasInjecting;
-            event.recycle();
-        }
-        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-            nativeTouchDown = false;
-        }
-    }
-
-    private static void injectKey(WebView view, int action, int keyCode) {
-        if (keyCode <= 0) {
-            return;
-        }
-        if (!view.hasFocus()) {
-            view.requestFocus();
-        }
-        long now = SystemClock.uptimeMillis();
-        KeyEvent event = new KeyEvent(now, now, action, keyCode, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD);
-        view.dispatchKeyEvent(event);
-    }
 
     private static boolean isFinite(float value) {
         return !Float.isNaN(value) && !Float.isInfinite(value);
