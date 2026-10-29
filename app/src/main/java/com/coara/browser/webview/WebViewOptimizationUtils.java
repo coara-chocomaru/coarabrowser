@@ -11,8 +11,6 @@ import androidx.webkit.WebViewFeature;
 
 import com.coara.browser.R;
 
-import org.json.JSONObject;
-
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -21,45 +19,6 @@ public final class WebViewOptimizationUtils {
     private static final Map<String, Boolean> FEATURE_SUPPORT_CACHE = new HashMap<>();
 
     private WebViewOptimizationUtils() {}
-
-    public static void installNativeBridgeToken(WebView webView, String token) {
-        if (webView == null || token == null || token.length() < 32 || token.length() > 128) {
-            return;
-        }
-        webView.setTag(R.id.native_bridge_token, token);
-        String script = nativeBridgeTokenScript(token);
-        if (isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-            try {
-                WebViewCompat.addDocumentStartJavaScript(webView, script, Collections.singleton("*"));
-            } catch (Throwable ignored) {
-            }
-        }
-        try {
-            webView.evaluateJavascript(script, null);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    public static void refreshNativeBridgeToken(WebView webView) {
-        if (webView == null) {
-            return;
-        }
-        Object value = webView.getTag(R.id.native_bridge_token);
-        if (!(value instanceof String)) {
-            return;
-        }
-        try {
-            webView.evaluateJavascript(nativeBridgeTokenScript((String) value), null);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private static String nativeBridgeTokenScript(String token) {
-        return "(function(){try{if(window.top!==window)return;var v=" + JSONObject.quote(token)
-                + ";var d=Object.getOwnPropertyDescriptor(window,'__coaraNativeBridgeToken');"
-                + "if(d){if(d.value!==v)return;return;}Object.defineProperty(window,'__coaraNativeBridgeToken',"
-                + "{value:v,writable:false,configurable:false,enumerable:false});}catch(e){}})();";
-    }
 
     public static boolean isFeatureSupported(String feature) {
         if (feature == null || feature.isEmpty()) {
@@ -231,7 +190,7 @@ public final class WebViewOptimizationUtils {
         }
     }
 
-    private static final String SPA_HOOK_JS = "var sendNative=function(type,value){try{if(window.CoaraNativeBridge&&typeof window.CoaraNativeBridge.postMessage==='function'){var m={type:type};if(type==='url')m.url=value;else m.detected=value;window.CoaraNativeBridge.postMessage(JSON.stringify(m));return;}}catch(e){}try{if(type==='url')AndroidBridge.onUrlChange(value,window.__coaraNativeBridgeToken);else AndroidBridge.onSpaDetected(value,window.__coaraNativeBridgeToken);}catch(e){}};"
+    private static final String SPA_HOOK_JS = "var sendNative=function(type,value){try{if(window.CoaraNativeBridge&&typeof window.CoaraNativeBridge.postMessage==='function'){var m={type:type};if(type==='url')m.url=value;else m.detected=value;window.CoaraNativeBridge.postMessage(JSON.stringify(m));return;}}catch(e){}try{if(type==='url')AndroidBridge.onUrlChange(value);else AndroidBridge.onSpaDetected(value);}catch(e){}};"
             + "var hook=function(first){try{"
             + "if(!window.__coaraHistoryHooked){"
             + "window.__coaraHistoryHooked=true;"
