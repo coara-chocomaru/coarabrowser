@@ -20,6 +20,8 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -193,8 +195,20 @@ public final class PluginManager {
         return new PluginBridge(this, ops);
     }
 
-    public String getToken() {
-        return token;
+    public String tokenFor(String id) {
+        if (id == null || id.isEmpty() || id.length() > 128) {
+            return "";
+        }
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(tokenBytes, "HmacSHA256"));
+            byte[] digest = mac.doFinal(id.getBytes(StandardCharsets.UTF_8));
+            byte[] tokenValue = new byte[16];
+            System.arraycopy(digest, 0, tokenValue, 0, tokenValue.length);
+            return toHex(tokenValue);
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     public String keyFor(String id) {
@@ -629,6 +643,10 @@ public final class PluginManager {
             if (p == null || !p.enabled) {
                 return null;
             }
+        }
+        String activeUrl = ops == null ? "" : ops.currentUrl();
+        if (activeUrl == null || activeUrl.isEmpty() || !PluginPatterns.isTarget(p, activeUrl)) {
+            return null;
         }
         switch (op) {
             case "log":
@@ -1084,11 +1102,13 @@ public final class PluginManager {
         }
     }
 
-    boolean checkToken(String candidate) {
-        if (candidate == null) {
+    boolean checkToken(String candidate, String id) {
+        if (candidate == null || id == null || candidate.length() != 32) {
             return false;
         }
-        return MessageDigest.isEqual(candidate.getBytes(StandardCharsets.UTF_8), tokenBytes);
+        String expected = tokenFor(id);
+        return expected.length() == 32 && MessageDigest.isEqual(
+                candidate.getBytes(StandardCharsets.US_ASCII), expected.getBytes(StandardCharsets.US_ASCII));
     }
 
     private void handleReport(String id, String kind, String message, String json) {

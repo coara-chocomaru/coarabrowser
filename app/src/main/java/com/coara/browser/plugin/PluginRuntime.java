@@ -85,6 +85,7 @@ public final class PluginRuntime {
         final Set<String> activeIds = new LinkedHashSet<>();
         int appliedVersion = -1;
         boolean startScriptsActive = false;
+        boolean bridgeGuardRegistrationFailed = false;
         boolean injectedForNavigation = false;
         long navigationStartedAt = 0L;
         long navigationGeneration = 0L;
@@ -245,7 +246,11 @@ public final class PluginRuntime {
             manager.reloadIfChanged();
             ViewState state = new ViewState();
             state.currentUrl = boundedUrl(view.getUrl());
-            view.addJavascriptInterface(manager.createBridge(new ViewOpsImpl(view, state)), PluginManager.BRIDGE_NAME);
+            if (supportsDocumentStartScript()) {
+                view.addJavascriptInterface(manager.createBridge(new ViewOpsImpl(view, state)), PluginManager.BRIDGE_NAME);
+            } else {
+                manager.log("W", "-", "安全なドキュメント開始処理が利用できないため、プラグインのネイティブ権限を無効にしました");
+            }
             view.setTag(R.id.plugin_view_state, state);
             syncStartScripts(view, state, manager);
         } catch (Throwable t) {
@@ -358,11 +363,16 @@ public final class PluginRuntime {
         }
         try {
             final ViewState state = stateOf(view);
-            if (state == null || state.startScriptsActive || state.injectedForNavigation) {
+            if (state == null || state.startScriptsActive || state.bridgeGuardRegistrationFailed
+                    || state.injectedForNavigation) {
                 return;
             }
             if (!view.getSettings().getJavaScriptEnabled()) {
                 return;
+            }
+            try {
+                view.evaluateJavascript(buildBridgeGuardScript(), null);
+            } catch (Throwable ignored) {
             }
             final PluginManager manager = PluginManager.get(view.getContext());
             List<PluginInfo> enabled = manager.getEnabledPlugins();
@@ -424,9 +434,18 @@ public final class PluginRuntime {
         }
     }
 
+    private static boolean supportsDocumentStartScript() {
+        try {
+            return WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private static void syncStartScripts(WebView view, ViewState state, PluginManager manager) {
         removeHandlers(state);
         state.startScriptsActive = false;
+        state.bridgeGuardRegistrationFailed = false;
         state.appliedVersion = manager.version();
         boolean supported;
         try {
@@ -435,6 +454,18 @@ public final class PluginRuntime {
             supported = false;
         }
         if (!supported) {
+            return;
+        }
+        try {
+            state.handlers.add(WebViewCompat.addDocumentStartJavaScript(
+                    view, buildBridgeGuardScript(), Collections.singleton("*")));
+        } catch (Throwable t) {
+            state.bridgeGuardRegistrationFailed = true;
+            try {
+                view.removeJavascriptInterface(PluginManager.BRIDGE_NAME);
+            } catch (Throwable ignored) {
+            }
+            manager.log("W", "-", "プラグインブリッジの保護スクリプトを登録できなかったため、ネイティブ権限を無効にしました: " + t.getClass().getSimpleName());
             return;
         }
         List<PluginInfo> enabled = manager.getEnabledPlugins();
@@ -494,8 +525,29 @@ public final class PluginRuntime {
         } catch (Throwable t) {
             removeHandlers(state);
             state.startScriptsActive = false;
-            manager.log("E", "-", "ドキュメント開始スクリプトの登録に失敗(フォールバックへ切替): " + t);
+            state.bridgeGuardRegistrationFailed = true;
+            try {
+                view.removeJavascriptInterface(PluginManager.BRIDGE_NAME);
+            } catch (Throwable ignored) {
+            }
+            manager.log("E", "-", "ドキュメント開始スクリプトの登録に失敗したため、ネイティブ権限を無効にしました: " + t.getClass().getSimpleName());
         }
+    }
+
+    private static String buildBridgeGuardScript() {
+        String bridge = JSONObject.quote(PluginManager.BRIDGE_NAME);
+        String guarded = JSONObject.quote("__coaraPluginBridgeGuarded");
+        return "(function(w){var ok=false;try{var n=w[" + bridge + "];"
+                + "if(n&&typeof n.invoke==='function'){var v={invoke:function(t,id,op,a,b,c){return n.invoke(t,id,op,a,b,c);}};"
+                + "Object.freeze(v.invoke);Object.freeze(v);"
+                + "try{Object.defineProperty(w," + bridge + ",{value:v,writable:false,configurable:false,enumerable:false});}catch(e){}"
+                + "var d=Object.getOwnPropertyDescriptor(w," + bridge + ");"
+                + "ok=!!(d&&d.value===v&&d.writable===false&&d.configurable===false&&w[" + bridge + "]===v);"
+                + "if(!ok){try{Object.freeze(n);Object.freeze(n.invoke);}catch(e){}"
+                + "d=Object.getOwnPropertyDescriptor(w," + bridge + ");"
+                + "ok=!!(d&&d.value===n&&d.writable===false&&d.configurable===false&&Object.isFrozen(n)&&Object.isFrozen(n.invoke));}"
+                + "}}catch(e){ok=false;}"
+                + "try{Object.defineProperty(w," + guarded + ",{value:ok,writable:false,configurable:false,enumerable:false});}catch(e){}})(window);";
     }
 
     private static String boundedUrl(String url) {
@@ -521,6 +573,7 @@ public final class PluginRuntime {
         for (ScheduledScript item : scheduled) {
             JSONObject o = new JSONObject();
             o.put("id", item.info.id);
+            o.put("token", manager.tokenFor(item.info.id));
             o.put("key", manager.keyFor(item.info.id + "#" + item.index));
             o.put("allFrames", item.entry.allFrames);
             o.put("matches", new JSONArray(PluginPatterns.toRegexList(PluginPatterns.effectiveMatches(item.entry.matches))));
@@ -529,7 +582,6 @@ public final class PluginRuntime {
         }
         List<String[]> values = new ArrayList<>();
         values.add(new String[]{"%BRIDGE%", PluginManager.BRIDGE_NAME});
-        values.add(new String[]{"%TOKEN%", manager.getToken()});
         values.add(new String[]{"%EXPECTED%", expected.toString()});
         String script = fill(template, values);
         return script.length() <= MAX_WATCHDOG_SCRIPT_CHARS ? script : null;
@@ -622,7 +674,7 @@ public final class PluginRuntime {
             String tail = template.substring(idx + "%BODY%".length());
             List<String[]> headValues = new ArrayList<>();
             headValues.add(new String[]{"%BRIDGE%", PluginManager.BRIDGE_NAME});
-            headValues.add(new String[]{"%TOKEN%", manager.getToken()});
+            headValues.add(new String[]{"%TOKEN%", manager.tokenFor(info.id)});
             headValues.add(new String[]{"%META%", meta.toString()});
             headValues.add(new String[]{"%CSS%", css.toString()});
             headValues.add(new String[]{"%KEY%", manager.keyFor(info.id + "#" + index)});

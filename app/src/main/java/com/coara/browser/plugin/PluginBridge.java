@@ -16,7 +16,7 @@ public final class PluginBridge {
         try {
             if (token == null || token.length() != 32 || id == null || id.isEmpty() || id.length() > 128
                     || op == null || op.isEmpty() || op.length() > 32 || !validArguments(op, a, b, c)
-                    || !manager.checkToken(token)) {
+                    || !manager.checkToken(token, id)) {
                 return null;
             }
             return manager.handleBridge(ops, id, op, a, b, c);

@@ -11,12 +11,25 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.Inet6Address;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
+import java.net.Socket;
 import java.net.URL;
+import java.net.URLConnection;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
 import java.util.Map;
 
 final class PluginHttp {
@@ -40,6 +53,16 @@ final class PluginHttp {
                 } catch (Exception ignored) {
                 }
             }
+        }
+    }
+
+    private static final class ResponseBuffer extends ByteArrayOutputStream {
+        ResponseBuffer(int size) {
+            super(size);
+        }
+
+        byte[] buffer() {
+            return buf;
         }
     }
 
@@ -111,11 +134,16 @@ final class PluginHttp {
     private static boolean isPrivateIpv4(long ip) {
         int a = (int) ((ip >> 24) & 0xFF);
         int b = (int) ((ip >> 16) & 0xFF);
-        return a == 10 || a == 127 || a == 0 || (a == 169 && b == 254) || (a == 172 && b >= 16 && b <= 31)
-                || (a == 192 && b == 168) || (a == 100 && b >= 64 && b <= 127) || a >= 224;
+        int c = (int) ((ip >> 8) & 0xFF);
+        return a == 0 || a == 10 || a == 127 || (a == 169 && b == 254)
+                || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168)
+                || (a == 100 && b >= 64 && b <= 127) || a >= 224
+                || (a == 192 && b == 0 && c == 0) || (a == 192 && b == 0 && c == 2)
+                || (a == 192 && b == 88 && c == 99) || (a == 198 && (b == 18 || b == 19))
+                || (a == 198 && b == 51 && c == 100) || (a == 203 && b == 0 && c == 113);
     }
 
-    static boolean isPrivateHost(String host) {
+    private static boolean isPrivateHost(String host) {
         if (host == null) {
             return true;
         }
@@ -123,11 +151,9 @@ final class PluginHttp {
         while (h.endsWith(".")) {
             h = h.substring(0, h.length() - 1);
         }
-        if (h.isEmpty() || h.startsWith("[") || h.indexOf(':') >= 0) {
-            return true;
-        }
-        if (h.equals("localhost") || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")
-                || h.endsWith(".lan") || h.endsWith(".home.arpa") || h.indexOf('.') < 0 && parseLooseIpv4(h) < 0) {
+        if (h.isEmpty() || h.equals("localhost") || h.endsWith(".localhost")
+                || h.endsWith(".local") || h.endsWith(".internal") || h.endsWith(".lan")
+                || h.endsWith(".home.arpa") || (h.indexOf('.') < 0 && h.indexOf(':') < 0 && parseLooseIpv4(h) < 0)) {
             return true;
         }
         long ip = parseLooseIpv4(h);
@@ -141,80 +167,261 @@ final class PluginHttp {
         return host.indexOf(':') >= 0 || host.startsWith("[") || parseLooseIpv4(host) >= 0;
     }
 
-    private static boolean resolvesToPrivate(String host) {
-        if (isIpLiteral(host)) {
-            return false;
+    private static boolean isBlockedAddress(InetAddress address) {
+        if (address == null || address.isAnyLocalAddress() || address.isLoopbackAddress()
+                || address.isLinkLocalAddress() || address.isSiteLocalAddress() || address.isMulticastAddress()) {
+            return true;
         }
+        byte[] raw = address.getAddress();
+        if (raw.length == 4) {
+            long ip = ((raw[0] & 0xFFL) << 24) | ((raw[1] & 0xFFL) << 16)
+                    | ((raw[2] & 0xFFL) << 8) | (raw[3] & 0xFFL);
+            return isPrivateIpv4(ip);
+        }
+        if (raw.length != 16) {
+            return true;
+        }
+        boolean mappedV4 = true;
+        for (int i = 0; i < 10; i++) {
+            if (raw[i] != 0) {
+                mappedV4 = false;
+                break;
+            }
+        }
+        mappedV4 = mappedV4 && raw[10] == (byte) 0xFF && raw[11] == (byte) 0xFF;
+        if (mappedV4) {
+            long ip = ((raw[12] & 0xFFL) << 24) | ((raw[13] & 0xFFL) << 16)
+                    | ((raw[14] & 0xFFL) << 8) | (raw[15] & 0xFFL);
+            return isPrivateIpv4(ip);
+        }
+        if ((raw[0] & 0xFE) == 0xFC || (raw[0] & 0xE0) != 0x20) {
+            return true;
+        }
+        return (raw[0] & 0xFF) == 0x20 && (raw[1] & 0xFF) == 0x01
+                && (raw[2] & 0xFF) == 0x0D && (raw[3] & 0xFF) == 0xB8;
+    }
+
+    private static InetAddress resolveAllowedAddress(List<String> connects, String url, String originUrl) {
+        final URL parsed;
+        final String host;
+        final String scheme;
         try {
-            java.net.InetAddress[] addrs = java.net.InetAddress.getAllByName(host);
-            for (java.net.InetAddress a : addrs) {
-                if (a.isAnyLocalAddress() || a.isLoopbackAddress() || a.isLinkLocalAddress()
-                        || a.isSiteLocalAddress() || a.isMulticastAddress()) {
-                    return true;
+            parsed = new URL(url);
+            host = parsed.getHost();
+            scheme = parsed.getProtocol();
+            if (parsed.getUserInfo() != null || host == null || host.isEmpty()
+                    || !("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))) {
+                return null;
+            }
+        } catch (Exception e) {
+            return null;
+        }
+        String normalizedHost = host.toLowerCase(Locale.US);
+        while (normalizedHost.endsWith(".")) {
+            normalizedHost = normalizedHost.substring(0, normalizedHost.length() - 1);
+        }
+        String lookupHost = canonicalHost(normalizedHost);
+        if (lookupHost.indexOf('%') >= 0 || isPrivateHost(lookupHost)) {
+            return null;
+        }
+        boolean secure = "https".equalsIgnoreCase(scheme);
+        boolean permitted = sameOrigin(originUrl == null ? "" : originUrl, url);
+        String policyHost = lookupHost;
+        if (!permitted && connects != null) {
+            for (String item : connects) {
+                if (item == null) {
+                    continue;
                 }
-                byte[] raw = a.getAddress();
-                if (raw.length == 4) {
-                    long ip = ((raw[0] & 0xFFL) << 24) | ((raw[1] & 0xFFL) << 16) | ((raw[2] & 0xFFL) << 8) | (raw[3] & 0xFFL);
-                    if (isPrivateIpv4(ip)) {
-                        return true;
-                    }
-                } else if (raw.length == 16 && (raw[0] & 0xFE) == 0xFC) {
-                    return true;
+                String entry = canonicalHost(item.trim().toLowerCase(Locale.US));
+                if (entry.isEmpty()) {
+                    continue;
+                }
+                if (entry.equals("*") && secure) {
+                    permitted = true;
+                    break;
+                }
+                if (policyHost.equals(entry)) {
+                    permitted = true;
+                    break;
+                }
+                if (!isIpLiteral(policyHost) && policyHost.endsWith("." + entry)) {
+                    permitted = true;
+                    break;
                 }
             }
-            return false;
+        }
+        if (!permitted) {
+            return null;
+        }
+        try {
+            InetAddress[] addresses = InetAddress.getAllByName(lookupHost);
+            if (addresses == null || addresses.length == 0) {
+                return null;
+            }
+            InetAddress selected = null;
+            for (InetAddress address : addresses) {
+                if (isBlockedAddress(address)) {
+                    return null;
+                }
+                if (selected == null) {
+                    selected = address;
+                }
+            }
+            return selected;
         } catch (Exception e) {
-            return true;
+            return null;
         }
     }
 
-    static boolean hostAllowed(List<String> connects, String url, String originUrl) {
-        String host;
-        String scheme;
-        try {
-            URL u = new URL(url);
-            host = u.getHost();
-            scheme = u.getProtocol();
-            if (u.getUserInfo() != null) {
-                return false;
-            }
-        } catch (Exception e) {
-            return false;
+
+    private static String pinnedUrl(URL original, InetAddress address) throws Exception {
+        String host = address.getHostAddress();
+        if (address instanceof Inet6Address) {
+            host = "[" + host + "]";
         }
-        if (host == null || host.isEmpty()) {
-            return false;
+        return new URL(original.getProtocol(), host, original.getPort(), original.getFile()).toString();
+    }
+
+    private static String canonicalHost(String host) {
+        if (host == null) {
+            return "";
         }
-        host = host.toLowerCase(Locale.US);
-        while (host.endsWith(".")) {
-            host = host.substring(0, host.length() - 1);
+        String value = host;
+        if (value.startsWith("[") && value.endsWith("]") && value.length() > 2) {
+            value = value.substring(1, value.length() - 1);
         }
-        boolean secure = "https".equalsIgnoreCase(scheme);
-        String origin = originUrl == null ? "" : originUrl;
-        boolean priv = isPrivateHost(host);
-        if (sameOrigin(origin, url)) {
-            return true;
+        while (value.endsWith(".")) {
+            value = value.substring(0, value.length() - 1);
         }
-        if (connects != null) {
-            for (String c : connects) {
-                String e = c.trim().toLowerCase(Locale.US);
-                if (e.isEmpty()) {
-                    continue;
+        return value;
+    }
+
+    private static String hostHeader(URL original) {
+        String host = original.getHost();
+        int port = original.getPort();
+        if (port >= 0 && port != original.getDefaultPort()) {
+            return host + ":" + port;
+        }
+        return host;
+    }
+
+    private static final class PinnedSSLSocketFactory extends SSLSocketFactory {
+        private final SSLSocketFactory delegate;
+        private final String host;
+        private final InetAddress address;
+        private final int port;
+        private final int connectTimeout;
+        private final int readTimeout;
+
+        PinnedSSLSocketFactory(String host, InetAddress address, int port, int connectTimeout, int readTimeout) {
+            this.delegate = (SSLSocketFactory) HttpsURLConnection.getDefaultSSLSocketFactory();
+            this.host = host;
+            this.address = address;
+            this.port = port;
+            this.connectTimeout = connectTimeout;
+            this.readTimeout = readTimeout;
+        }
+
+        private SSLSocket connectPinned(InetAddress localAddress, int localPort) throws java.io.IOException {
+            Socket raw = new Socket();
+            try {
+                if (localAddress != null) {
+                    raw.bind(new InetSocketAddress(localAddress, Math.max(0, localPort)));
                 }
-                if (e.equals("*")) {
-                    if (secure && !priv && !resolvesToPrivate(host)) {
-                        return true;
+                raw.connect(new InetSocketAddress(address, port), connectTimeout);
+                raw.setSoTimeout(readTimeout);
+                return wrap(raw, true);
+            } catch (java.io.IOException e) {
+                try {
+                    raw.close();
+                } catch (Exception ignored) {
+                }
+                throw e;
+            }
+        }
+
+        private SSLSocket wrap(Socket socket, boolean autoClose) throws java.io.IOException {
+            if (socket == null || socket.getInetAddress() == null || !address.equals(socket.getInetAddress())
+                    || socket.getPort() != port) {
+                if (autoClose && socket != null) {
+                    try {
+                        socket.close();
+                    } catch (Exception ignored) {
                     }
-                    continue;
                 }
-                if (host.equals(e)) {
-                    return true;
-                }
-                if (!priv && host.endsWith("." + e) && (secure || !isIpLiteral(host)) && !resolvesToPrivate(host)) {
-                    return true;
+                throw new java.io.IOException("pinned destination mismatch");
+            }
+            SSLSocket ssl = (SSLSocket) delegate.createSocket(socket, host, port, autoClose);
+            SSLParameters parameters = ssl.getSSLParameters();
+            try {
+                parameters.setEndpointIdentificationAlgorithm("HTTPS");
+            } catch (Throwable ignored) {
+            }
+            if (!isIpLiteral(host)) {
+                try {
+                    parameters.setServerNames(Collections.singletonList(new javax.net.ssl.SNIHostName(host)));
+                } catch (Throwable ignored) {
                 }
             }
+            ssl.setSSLParameters(parameters);
+            ssl.setSoTimeout(readTimeout);
+            return ssl;
         }
-        return false;
+
+        @Override
+        public String[] getDefaultCipherSuites() {
+            return delegate.getDefaultCipherSuites();
+        }
+
+        @Override
+        public String[] getSupportedCipherSuites() {
+            return delegate.getSupportedCipherSuites();
+        }
+
+        @Override
+        public Socket createSocket() throws java.io.IOException {
+            throw new java.io.IOException("pinned destination required");
+        }
+
+        @Override
+        public Socket createSocket(String ignored, int requestedPort) throws java.io.IOException {
+            if (requestedPort != port) {
+                throw new java.io.IOException("pinned port mismatch");
+            }
+            return connectPinned(null, 0);
+        }
+
+        @Override
+        public Socket createSocket(String ignored, int requestedPort, InetAddress local, int localPort) throws java.io.IOException {
+            if (requestedPort != port) {
+                throw new java.io.IOException("pinned port mismatch");
+            }
+            return connectPinned(local, localPort);
+        }
+
+        @Override
+        public Socket createSocket(InetAddress ignored, int requestedPort) throws java.io.IOException {
+            if (requestedPort != port) {
+                throw new java.io.IOException("pinned port mismatch");
+            }
+            return connectPinned(null, 0);
+        }
+
+        @Override
+        public Socket createSocket(InetAddress ignored, int requestedPort, InetAddress local, int localPort) throws java.io.IOException {
+            if (requestedPort != port) {
+                throw new java.io.IOException("pinned port mismatch");
+            }
+            return connectPinned(local, localPort);
+        }
+
+        @Override
+        public Socket createSocket(Socket socket, String ignored, int requestedPort, boolean autoClose) throws java.io.IOException {
+            if (requestedPort != port) {
+                throw new java.io.IOException("pinned port mismatch");
+            }
+            return wrap(socket, autoClose);
+        }
     }
 
     static JSONObject errorPayload(String message) {
@@ -284,16 +491,32 @@ final class PluginHttp {
                 if (call.aborted) {
                     return abortedPayload();
                 }
-                if (!hostAllowed(connects, current, origin)) {
-                    return errorPayload("blocked host (not in @connect): " + hostOf(current));
+                URL original = new URL(current);
+                InetAddress pinnedAddress = resolveAllowedAddress(connects, current, origin);
+                if (pinnedAddress == null) {
+                    return errorPayload("blocked host (not in @connect or non-public address): " + hostOf(current));
                 }
-                HttpURLConnection c = (HttpURLConnection) new URL(current).openConnection();
+                URLConnection opened = new URL(pinnedUrl(original, pinnedAddress)).openConnection(Proxy.NO_PROXY);
+                if (!(opened instanceof HttpURLConnection)) {
+                    return errorPayload("unsupported connection");
+                }
+                HttpURLConnection c = (HttpURLConnection) opened;
+                if (c instanceof HttpsURLConnection) {
+                    int effectivePort = original.getPort() < 0 ? original.getDefaultPort() : original.getPort();
+                    HttpsURLConnection https = (HttpsURLConnection) c;
+                    HostnameVerifier verifier = HttpsURLConnection.getDefaultHostnameVerifier();
+                    String tlsHost = canonicalHost(original.getHost());
+                    https.setSSLSocketFactory(new PinnedSSLSocketFactory(tlsHost, pinnedAddress,
+                            effectivePort, Math.min(timeout, 20000), timeout));
+                    https.setHostnameVerifier((ignored, session) -> verifier != null && verifier.verify(tlsHost, session));
+                }
                 call.conn = c;
                 try {
                     c.setConnectTimeout(Math.min(timeout, 20000));
                     c.setReadTimeout(timeout);
                     c.setInstanceFollowRedirects(false);
                     c.setRequestMethod(method);
+                    c.setRequestProperty("Host", hostHeader(original));
                     boolean hasCookie = false;
                     boolean hasUa = false;
                     if (headers != null) {
@@ -369,13 +592,19 @@ final class PluginHttp {
                     }
                     InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
                     byte[] data = new byte[0];
+                    int dataLength = 0;
                     if (in != null && !method.equals("HEAD")) {
                         try (InputStream is = in) {
-                            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-                            byte[] buf = new byte[16384];
+                            int declaredLength = c.getContentLength();
+                            int initialCapacity = declaredLength > 0 ? Math.min(declaredLength, 64 * 1024) : 32;
+                            ResponseBuffer bos = new ResponseBuffer(initialCapacity);
+                            byte[] buf = new byte[8192];
                             int n;
                             long total = 0L;
-                            while ((n = is.read(buf)) > 0) {
+                            while ((n = is.read(buf)) != -1) {
+                                if (n == 0) {
+                                    continue;
+                                }
                                 if (call.aborted) {
                                     return abortedPayload();
                                 }
@@ -385,7 +614,8 @@ final class PluginHttp {
                                 }
                                 bos.write(buf, 0, n);
                             }
-                            data = bos.toByteArray();
+                            data = bos.buffer();
+                            dataLength = bos.size();
                         }
                     }
                     JSONObject out = new JSONObject();
@@ -395,10 +625,10 @@ final class PluginHttp {
                     out.put("headers", headerString(c));
                     String ctype = c.getContentType();
                     if (responseType.equals("arraybuffer") || responseType.equals("blob") || opts.optBoolean("binary", false)) {
-                        out.put("b64", Base64.encodeToString(data, Base64.NO_WRAP));
+                        out.put("b64", Base64.encodeToString(data, 0, dataLength, Base64.NO_WRAP));
                         out.put("mime", ctype == null ? "" : ctype);
                     } else {
-                        out.put("text", new String(data, charsetOf(ctype, charsetOverride)));
+                        out.put("text", new String(data, 0, dataLength, charsetOf(ctype, charsetOverride)));
                     }
                     return out;
                 } finally {
