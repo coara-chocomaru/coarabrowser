@@ -9,8 +9,8 @@ android {
     defaultConfig {
         minSdk = 24
         targetSdk = 31
-        versionCode = 345
-        versionName = "4.4.4-6"
+        versionCode = 346
+        versionName = "4.4.4-7"
 
         if (project.hasProperty('bundleBuild')) {
             ndk {
