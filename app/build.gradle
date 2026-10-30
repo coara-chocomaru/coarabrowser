@@ -7,7 +7,7 @@ android {
     namespace = 'com.coara.browser'
 
     defaultConfig {
-        minSdk = 27
+        minSdk = 26
         targetSdk = 31
         versionCode = 347
         versionName = "4.4.4-7"
